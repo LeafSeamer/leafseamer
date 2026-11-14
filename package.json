@@ -1,0 +1,42 @@
+{
+  "name": "@leafseamer/seamer",
+  "version": "0.1.0-dev.1",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "description": "LeafSeamer 自动化核心服务",
+  "engines": {
+    "node": ">=24.22.0 <25"
+  },
+  "packageManager": "npm@11.19.1",
+  "bin": {
+    "leafseamer": "dist/cli.mjs"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "runtime-inputs.json",
+    "sdk-runtime.json",
+    "pairing-runtime.json",
+    "validation-runtime.json"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "start": "node --disallow-code-generation-from-strings dist/cli.mjs start",
+    "test": "npm run build && node --disallow-code-generation-from-strings --test test/*.test.mjs",
+    "prepack": "npm run build"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
+    "better-sqlite3": "13.0.3",
+    "canonicalize": "5.1.0",
+    "ws": "8.22.0"
+  },
+  "devDependencies": {
+    "@leafseamer/controller": "file:../leafseamer-controller",
+    "@leafseamer/sdk": "file:../leafseamer-sdk"
+  }
+}

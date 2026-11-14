@@ -1,0 +1,38 @@
+{
+  "format": "leafseamer-shared-runtime/1",
+  "source_repository": "https://github.com/LeafSeamer/leafseamer-controller",
+  "source_commit": "b8c323f77c7276bc3d7a71693392d4143dce26bf",
+  "files": {
+    "src/runtime/auth-clock.mjs": {
+      "source": "src/auth-clock.mjs",
+      "sha256": "15eeb110542e0c102f374aa0fc72cd79d9548a650d7bc764d5d15238751e8c90"
+    },
+    "src/runtime/auth-clock-value.mjs": {
+      "source": "src/auth-clock-value.mjs",
+      "sha256": "36b3e04d8018674d86ac118f99c31dbfa03e11956f588775c1eb90d22b3c7868"
+    },
+    "src/runtime/auth-clock-store.mjs": {
+      "source": "src/auth-clock-store.mjs",
+      "sha256": "ab71dbedcaa93fd8df5099d0f43e6302716a395b31bb1c2aba047653ba0b93c2"
+    },
+    "src/runtime/native-clock.mjs": {
+      "source": "src/native-clock.mjs",
+      "sha256": "e71b15efba87ed20f20ca581b6ae332fdaf7063364afe5229a215c81b2c251ec"
+    },
+    "native/clock.cc": {
+      "source": "native/clock.cc",
+      "sha256": "aa43575288a2c40dfcef46799a968e76b9169efc763b20067e0bfead5fe7d315"
+    },
+    "native-inputs.json": {
+      "source": "native-inputs.json",
+      "sha256": "f86325349a9e9279f75e0d343e0611a5bf835e29975f01d47afe67e0a98d89fa"
+    }
+  },
+  "prebuilt_profiles": {
+    "win32-x64": {
+      "binary_sha256": "7044c6e414dc57675176382bc6375d0dd25bea3f5ed85d235d8230c1cd3da7ec",
+      "manifest_sha256": "ea6fe2cda1d94814b965a3024017a9bc86feccc051f719e2446febf8c059d0aa",
+      "source_cmake_sha256": "2207aa2f76705f10a7a939c3cc7477b14c8e947151277840f011b00674b0b533"
+    }
+  }
+}

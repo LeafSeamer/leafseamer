@@ -1,0 +1,16 @@
+{
+  "format": "leafseamer-shared-validation/1",
+  "source_repository": "https://github.com/LeafSeamer/leafseamer-controller",
+  "manifest_sha256": "4150f3127c334a6df1fa4ae9fb5abe9b565b711e686a81d51aa74ad82fdbf559",
+  "artifacts": {
+    "configuration-validator.mjs": "4182b2502a8ece0c9cf4dabbe7d0065ac84c5cc046254aac4e98c37ab31632b7",
+    "configuration-worker.mjs": "d95b093183eb40c98ae47f28a68460f8ccf9b1da319e2a73193e4baf0a645907",
+    "configuration-schema.mjs": "1840191532441caa76f70e9ffb0584e37d9818251d79cd2461dc08818f0108ba",
+    "configuration-wire.mjs": "c9f28411885e5c1b3d71827a4fff239fa2d85a284389bb7b1197fe040cc05433"
+  },
+  "license_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
+  "dependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  }
+}

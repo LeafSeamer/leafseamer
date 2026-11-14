@@ -1,0 +1,19 @@
+{
+  "format": "leafseamer-shared-pairing/1",
+  "source_repository": "https://github.com/LeafSeamer/leafseamer-controller",
+  "manifest_sha256": "4150f3127c334a6df1fa4ae9fb5abe9b565b711e686a81d51aa74ad82fdbf559",
+  "artifacts": {
+    "peer-pairing-store.mjs": "4ba4c1b24a118872bba611c57f7133aa0160f253e337f941ec8d9fd12daa9d3a",
+    "peer-pairing-value.mjs": "1875307d15bd7a50d2499d89112b75627291b37d85d82b2d8a3886d860024ae0",
+    "peer-pairing-transport.mjs": "da98ae935b3f8eb5d458d9da617b91f6ac8392e16f2dabeface7fb680a40a359",
+    "identity-error.mjs": "156d83bf157cb18b92038e2ae13d598f4343328781b81f66aba5590b8dc54be1",
+    "opaque-secret.mjs": "6cf425edfedb82adc7d38e156162da08337d2f66cf9d50aeb44eee901ae52959",
+    "peer-session-denial.mjs": "183ae3dd44d448b16783c428402d01e81a296c0b59e8fb787639645a2df998d8",
+    "session-denial-delivery.mjs": "33e53599b4ba23bb4a3254262b74b67094e91da81a037a57b989c59c9d14802f",
+    "peer-device-bindings.mjs": "4e9264591deb080842814eb34eadaa2d7ba5af1d40edb432b7a52e514875208b",
+    "peer-device-events.mjs": "3911e71dacb9314d818a99f1147f1ebcb001223dd39e76c822e833761b608b98",
+    "peer-event-websocket.mjs": "5b8e933c97b5f2b52fb934fbd75b96d3ba27f946828113a53ef0500e2fe6cbe9"
+  },
+  "auth_clock_value_sha256": "36b3e04d8018674d86ac118f99c31dbfa03e11956f588775c1eb90d22b3c7868",
+  "license_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"
+}

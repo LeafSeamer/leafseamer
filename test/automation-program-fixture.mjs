@@ -1,0 +1,12 @@
+import crypto from 'node:crypto';
+import canonicalize from 'canonicalize';
+export const digest=value=>'sha256:'+crypto.createHash('sha256').update(canonicalize(value)).digest('hex');
+export const ref={id:'fixture',revision:'1',digest:'sha256:'+'a'.repeat(64)};
+export const boolean={kind:'boolean',unit:null};
+export const literal={kind:'literal',value:true};
+export const input=(binding_id='trigger',source='event',producer_step_id=null)=>({binding_id,source,producer_step_id,authority_id:'fixture',registration_ref:ref,schema_ref:ref,projections:[{pointer:'/value',value_type:boolean,reads:[]}]});
+export const reference=(binding_id='trigger',source='event')=>({kind:'ref',binding_id,source,pointer:'/value'});
+export const action=binding_id=>({binding_id,authority_id:'fixture',controller_id:'controller',device_id:'device',provider_id:'provider',capability_id:'capability',registration_ref:ref,catalog_ref:ref,module_ref:ref,parameter_schema_ref:ref,result_schema_ref:ref,parameter_slots:[{pointer:'/value',value_type:boolean}],footprint:{complete:true,evidence_ref:ref,reads:[],writes:[],failure_writes:[],resources:[],preconditions:[],target_constraints:[],safe_failure_classes:[]}});
+export const step=(step_id,action_binding_id='action')=>({step_id,depends_on:[],required:true,failure_policy:'stop',kind:'action',action_binding_id,parameters:{value:false},parameter_bindings:[],guard:literal});
+export const delay=step_id=>({step_id,depends_on:[],required:true,failure_policy:'stop',kind:'delay',delay_ms:0,max_lateness_ms:100});
+export const source=()=>({definition_id:'definition',definition_version:'1',policy_ref:ref,program:{kind:'rule',trigger_binding_id:'trigger',condition:literal,groups:[{mode:'sequence',steps:[step('first'),step('second')]}]},input_bindings:[input()],action_bindings:[action('action')],alias_table:{ref:{...ref,digest:digest([])},entries:[]}});
