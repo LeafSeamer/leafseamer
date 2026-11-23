@@ -40,6 +40,16 @@ export function publicationInputs(draft,snapshot){
  checked('ContentRef',fixed.review_ref);
  const expected={scope:draft.scope,selection_digest:draft.selection_digest,alias_table_digest:hash(fixed.alias_table),policy_ref:draft.content.policy_ref,
   parameter_schema_refs:fixed.schemas.map(item=>({binding_id:item.binding_id,schema_ref:item.schema_ref})),parameter_scope:'all_allowed_parameters'};
+ if(Object.hasOwn(fixed.review??{},'binding_approval_refs')){
+  const references=fixed.review.binding_approval_refs;
+  need(Array.isArray(references)&&references.length===selections.length,'publication_review_binding');
+  for(const [index,reference] of references.entries()){
+   need(fields(reference,['binding_id','kind','approval_ref'])&&reference.binding_id===selections[index].binding_id&&
+    ['device','event'].includes(reference.kind)&&(reference.kind!=='event'||selections[index].kind==='input'),'publication_review_binding');
+   checked('ContentRef',reference.approval_ref);
+  }
+  expected.binding_approval_refs=references;
+ }
  need(same(fixed.review,expected)&&fixed.review_ref.digest===hash(fixed.review),'publication_review_binding');
  return {snapshot:fixed,schemas,inputs,actions};
 }

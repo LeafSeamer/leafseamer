@@ -39,9 +39,44 @@ test('显式迁移保留服务身份、旧迁移和草稿请求原件，普通�
 test('运行中的排他数据库和未知目标被拒绝，源库不变',t=>{
  const {dir}=seeded(t),before=originals(dir),running=openStorage(dir);
  try{assert.throws(()=>migrateStorage(dir,'2'),e=>e.code==='database_in_use');}finally{running.close();}
- assert.throws(()=>migrateStorage(dir,'5'),e=>e.code==='migration_target');
+ assert.throws(()=>migrateStorage(dir,'999'),e=>e.code==='migration_target');
  const after=originals(dir);assert.deepEqual(after.service_state,before.service_state);assert.deepEqual(after.schema_migration,before.schema_migration);
  const opened=openStorage(dir);try{assert.equal(opened.identity.schema_revision,'1');}finally{opened.close();}
+});
+test('Schema 5 显式迁移保留身份、历史和旧业务原件，冲突时回滚',t=>{
+ for(const fail of [true,false]){
+  const {dir,identity}=seeded(t);
+  migrateStorage(dir,'4');
+  if(fail)inspect(dir,db=>db.exec('CREATE TABLE subscription_reconcile_inbox(conflict TEXT)'));
+  const before=originals(dir);
+  if(fail){
+   assert.throws(()=>migrateStorage(dir,'5'),{code:'migration_failed'});
+   assert.deepEqual(originals(dir),before);
+   const open=openStorage(dir);try{assert.equal(open.identity.schema_revision,'4');}finally{open.close();}
+  }else{
+   assert.deepEqual(migrateStorage(dir,'5'),{...identity,schema_revision:'5'});
+   const after=originals(dir);
+   for(const key of Object.keys(before).filter(name=>!['service_state','schema_migration'].includes(name)))assert.deepEqual(after[key],before[key],key);
+   assert.deepEqual(after.schema_migration.slice(0,-1),before.schema_migration);
+   inspect(dir,db=>{
+    assert.deepEqual(db.pragma('foreign_key_check'),[]);
+    assert.equal(db.prepare('SELECT count(*) FROM subscription_reconcile_inbox').pluck().get(),0);
+    const epoch=db.prepare('SELECT service_id,database_instance_id,ingest_epoch FROM event_ingest_epoch').raw().get();
+    assert.deepEqual(epoch.slice(0,2),[identity.service_id,identity.database_instance_id]);
+    assert.match(epoch[2],/^[0-9a-f-]{36}$/);
+    assert.throws(()=>db.prepare('UPDATE event_ingest_epoch SET ingest_epoch=?').run(crypto.randomUUID()),/immutable_ingest_epoch/);
+    assert.throws(()=>db.exec('DELETE FROM event_ingest_epoch'),/immutable_ingest_epoch/);
+   });
+  }
+ }
+});
+test('Schema 6 提案表迁移冲突时保留 Schema 5 的全部身份和原迁移',t=>{
+ const {dir}=seeded(t);migrateStorage(dir,'5');
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_approval_proposal(conflict TEXT)'));
+ const before=originals(dir);
+ assert.throws(()=>migrateStorage(dir,'6'),{code:'migration_failed'});
+ assert.deepEqual(originals(dir),before);
+ const store=openStorage(dir);try{assert.equal(store.identity.schema_revision,'5');}finally{store.close();}
 });
 for(const collision of ['service_state_v2','schema_migration_v2','definition_request_v2','definition_version_reservation','definition_publication','definition_publication_proof'])test('迁移中途失败原子回滚：'+collision,t=>{
  const {dir}=seeded(t);inspect(dir,db=>db.exec('CREATE TABLE '+collision+'(sentinel TEXT) STRICT'));
@@ -84,6 +119,216 @@ test('schema1直升3在后段失败时连同schema2回滚',t=>{
  assert.equal(migrateStorage(dir,'3').schema_revision,'3');
 });
 const allOriginals=dir=>inspect(dir,db=>Object.fromEntries(db.prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name NOT IN('service_state','schema_migration') ORDER BY name").pluck().all().map(name=>[name,db.prepare('SELECT * FROM '+name).raw().all()])));
+test('Schema 7 迁移保留 Schema 6 原件，批准通知表冲突时整笔回滚',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'6');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_approval_outbox(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'7'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),6);db.exec('DROP TABLE automation_run_approval_outbox');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ const old=openStorage(dir);try{assert.equal(old.identity.schema_revision,'6');assert.equal(old.runs.approve,undefined);}finally{old.close();}
+ const oldRows=allOriginals(dir),migrated=migrateStorage(dir,'7');assert.deepEqual(migrated,{...identity,schema_revision:'7'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(oldRows))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ assert.deepEqual(migrateStorage(dir,'7'),migrated);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+ const current=openStorage(dir);try{assert.equal(typeof current.runs.approve,'function');}finally{current.close();}
+});
+test('Schema 8 保护队列表冲突不改变旧库，显式升级保留原件',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'7');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_approval_protection_outbox(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'8'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),7);db.exec('DROP TABLE automation_run_approval_protection_outbox');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'8'),{...identity,schema_revision:'8'});
+ const after=allOriginals(dir);for(const [name,rows]of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 9 追加回执表且保留 Schema 8 数据，表冲突时整笔回滚',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'8');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_approval_protection_receipt(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'9'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),8);db.exec('DROP TABLE automation_run_approval_protection_receipt');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'9'),{...identity,schema_revision:'9'});
+ const after=allOriginals(dir);for(const [name,rows]of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 10 以数值顺序核验迁移，并在反向拒绝表冲突时保留旧库',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'9');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_endorsement_rejection(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'10'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),9);db.exec('DROP TABLE automation_run_endorsement_rejection');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'10'),{...identity,schema_revision:'10'});
+ const after=allOriginals(dir);for(const [name,rows]of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ const store=openStorage(dir);try{assert.equal(store.identity.schema_revision,'10');}finally{store.close();}
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 11 显式迁移保留服务身份及旧原件，账本创建冲突原子回滚',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'10');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE event_binding_approval_revision(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'11'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),10);db.exec('DROP TABLE event_binding_approval_revision');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'11'),{...identity,schema_revision:'11'});
+ const after=allOriginals(dir);for(const [name,rows]of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.event_binding_approval_revision,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 13 显式启用预检账本，冲突回滚，保留旧身份、业务和迁移原件',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'12');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_run_preflight(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'13'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),12);db.exec('DROP TABLE automation_run_preflight');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ const running=openStorage(dir);try{assert.equal(running.runs.recordArmPreflight,undefined);}finally{running.close();}
+ assert.deepEqual(migrateStorage(dir,'13'),{...identity,schema_revision:'13'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(before)){
+  if(name!=='service_boot')assert.deepEqual(after[name],rows,name);
+ }
+ assert.deepEqual(after.automation_run_preflight,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 14 布防通知表冲突时整笔回滚，显式升级保留旧数据',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'13');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_arm_notification(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'14'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),13);db.exec('DROP TABLE automation_arm_notification');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'14'),{...identity,schema_revision:'14'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_activation_slot,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 15 显式启用准备回执与通知，冲突时保留全部旧原件',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'14');
+ const store=openStorage(dir);try{assert.equal(store.runs.armPreparationObservations,undefined);}finally{store.close();}
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_arm_preparation_notification(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'15'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),14);db.exec('DROP TABLE automation_arm_preparation_notification');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'15'),{...identity,schema_revision:'15'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_arm_preparation_receipt,[]);assert.deepEqual(after.automation_arm_preparation_notification,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 16 显式启用布防完成和封存通知，冲突时保留旧库',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'15');
+ const running=openStorage(dir);try{assert.equal(running.runs.completeArmRun,undefined);}finally{running.close();}
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_arm_completion_notification(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'16'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),15);db.exec('DROP TABLE automation_arm_completion_notification');});
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'16'),{...identity,schema_revision:'16'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_arm_completion,[]);assert.deepEqual(after.automation_arm_completion_notification,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 29 显式启用提交账本，末段失败时以原身份和全部旧数据打开 Schema 28',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'28');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_execution_submission_adjudication(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'29'),{code:'migration_failed'});
+ inspect(dir,db=>{
+  assert.equal(db.pragma('user_version',{simple:true}),28);
+  assert.equal(db.prepare("SELECT count(*) FROM sqlite_schema WHERE name='automation_execution_submission_attempt'").pluck().get(),0);
+  db.exec('DROP TABLE automation_execution_submission_adjudication');
+ });
+ assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir).schema_migration,history);
+ const previous=openStorage(dir);try{assert.equal(previous.identity.schema_revision,'28');}finally{previous.close();}
+ const saved=allOriginals(dir);
+ assert.deepEqual(migrateStorage(dir,'29'),{...identity,schema_revision:'29'});
+ const after=allOriginals(dir);for(const [name,rows] of Object.entries(saved))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ for(const suffix of ['', '_attempt','_uncertain','_adjudication'])assert.deepEqual(after['automation_execution_submission'+suffix],[]);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 30 显式启用终态证据，末段冲突保留 Schema 29 及其原件',t=>{
+ const {dir,identity}=seeded(t);
+ migrateStorage(dir,'29');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_execution_command_terminal(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'30'),{code:'migration_failed'});
+ inspect(dir,db=>{
+  assert.equal(db.pragma('user_version',{simple:true}),29);
+  db.exec('DROP TABLE automation_execution_command_terminal');
+ });
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ const previous=openStorage(dir);try{assert.equal(previous.identity.schema_revision,'29');}finally{previous.close();}
+ const saved=allOriginals(dir);
+ assert.deepEqual(migrateStorage(dir,'30'),{...identity,schema_revision:'30'});
+ const after=allOriginals(dir);
+ for(const [name,rows] of Object.entries(saved))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ assert.deepEqual(after.automation_execution_command_terminal,[]);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 31 显式升级依赖校验，冲突回滚保留 Schema 30 及其原件',t=>{
+ const {dir,identity}=seeded(t);
+ migrateStorage(dir,'30');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE schema_migration_v31(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'31'),{code:'migration_failed'});
+ inspect(dir,db=>db.exec('DROP TABLE schema_migration_v31'));
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ const previous=openStorage(dir);try{assert.equal(previous.identity.schema_revision,'30');}finally{previous.close();}
+ const saved=allOriginals(dir);
+ assert.deepEqual(migrateStorage(dir,'31'),{...identity,schema_revision:'31'});
+ assert.deepEqual(allOriginals(dir),saved);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 32 显式增加普通提交，冲突时保留原业务和迁移历史',t=>{
+ const {dir,identity}=seeded(t);
+ migrateStorage(dir,'31');
+ const history=originals(dir).schema_migration,before=allOriginals(dir);
+ inspect(dir,db=>db.exec('CREATE TABLE automation_execution_commit(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'32'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),31);db.exec('DROP TABLE automation_execution_commit');});
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'32'),{...identity,schema_revision:'32'});
+ const after=allOriginals(dir);
+ assert.deepEqual(after.automation_execution_commit,[]);
+ for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
+test('Schema 33 显式增加通知回执，冲突时完整保留 Schema 32',t=>{
+ const {dir,identity}=seeded(t);
+ migrateStorage(dir,'32');
+ const history=originals(dir).schema_migration,before=allOriginals(dir);
+ inspect(dir,db=>db.exec('CREATE TABLE automation_execution_notification_receipt(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'33'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),32);db.exec('DROP TABLE automation_execution_notification_receipt');});
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'33'),{...identity,schema_revision:'33'});
+ const after=allOriginals(dir);
+ for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_execution_notification_receipt,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
 for(const from of ['1','2','3'])test('显式schema4迁移保留全部旧表、身份和历史，包含非空批准原件：'+from,t=>{
  const {dir,identity,draft}=seeded(t);if(from!=='1')migrateStorage(dir,from);
  if(from==='3')inspect(dir,db=>{db.pragma('foreign_keys=ON');const scope={authority_service_id:identity.service_id,database_instance_id:identity.database_instance_id},bundle={registration_ref:{id:'fixture'},bindings:[]};

@@ -1,18 +1,140 @@
 {
   "format": "leafseamer-shared-pairing/1",
   "source_repository": "https://github.com/LeafSeamer/leafseamer-controller",
-  "manifest_sha256": "4150f3127c334a6df1fa4ae9fb5abe9b565b711e686a81d51aa74ad82fdbf559",
+  "manifest_sha256": "f11861ea4ebfeacfbf4ae274fa330bcd14a7bd19e393b9d256558618b34a8911",
+  "supervision_artifacts": {
+    "core-bootstrap.mjs": "550818d9a5a2501b33c6a4f4886d09ecd333a3d363c93700bf7c83b0958b8210",
+    "supervisor-control.mjs": "8c52033f1bb3b6694b0f75ad5e93a8e37cf0092d5ccc3c9cc8d350a65e824ea5",
+    "authority-source-window.mjs": "0df6f598329550447eaf220011e1ac493d54319fae05b2479d96bd8e12201e3e",
+    "time-provider-link.mjs": "5bef33cbea80e8bfcf6076d294cd72fed87e0409407210db9cebd9d63cc7d403",
+    "runtime/canonicalize.mjs": "c1d0195af2a0748454b06af8f218e5c90415c19d39154d0058fee8229c12d859",
+    "time-provider-polls.mjs": "0291d39c50a040d3d3f2899dc3b8786d6d39980ecc65654fc7b7b6b44dad3afc",
+    "time-provider-capture.mjs": "d53c442c32df21fbc0f96abbe32618bb508c39bb2e4e03f5331fcb898b5ece28",
+    "reference-time-anchor.mjs": "3f3f7c13ea12281d912883fa54db7433777da3f5a90ff059300969e08ae6c757",
+    "reference-time-bundle.mjs": "59121558ea216938e54a42e6f1f6e6de740c9cd771960bb13498ff30af196cf5",
+    "reference-time-scheduler.mjs": "781aa95efbfe928881f0842327ae952bfc313bca8297ee265b1ce74b12552b5c"
+  },
+  "additional_manifests": {
+    "ee77b3f4b0e98b8ee0a7ec1b0fa60986a82b17788e821c3765cf75d82154e30c": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "ba89cf6795a19313f2c84f95a21e696077422e02506fa379d4d3b6b924c8aa4d",
+      "peer-run-preparation.mjs": "c1449f9efe50e9e6df86f4953c18f40c8588b55d65614ea28510d9ebd41de12d",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "233d35064ba13209337f1a243458bfc1afc6a169ea0071fe0448f7d17830ec8c",
+      "supervisor-control.mjs": "36d4eb70482fcecc2568b5228aea2d7040c47831d851f72acd6a81665d5eaa12"
+    },
+    "9c023409c77b4785863f400b9d137c49f58b630946fae574c383409341d5eb54": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "ba89cf6795a19313f2c84f95a21e696077422e02506fa379d4d3b6b924c8aa4d",
+      "peer-run-preparation.mjs": "c1449f9efe50e9e6df86f4953c18f40c8588b55d65614ea28510d9ebd41de12d",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "233d35064ba13209337f1a243458bfc1afc6a169ea0071fe0448f7d17830ec8c",
+      "supervisor-control.mjs": "36d4eb70482fcecc2568b5228aea2d7040c47831d851f72acd6a81665d5eaa12"
+    },
+    "9c606de28d556dfcc6610791135f04c92856fa56064aa196e7a424033cb75021": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "24f7dcc9911a1bc6655dc3ebe610e16de1aa2c3c377870198fdfefa3a2922c0c",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "233d35064ba13209337f1a243458bfc1afc6a169ea0071fe0448f7d17830ec8c",
+      "supervisor-control.mjs": "36d4eb70482fcecc2568b5228aea2d7040c47831d851f72acd6a81665d5eaa12"
+    },
+    "95ed310d7bf8a5db5cb23fbc52298ea95e6919083c2b9e679bb98eb511701faf": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "24f7dcc9911a1bc6655dc3ebe610e16de1aa2c3c377870198fdfefa3a2922c0c",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "233d35064ba13209337f1a243458bfc1afc6a169ea0071fe0448f7d17830ec8c",
+      "supervisor-control.mjs": "cdd33cb152d00e62da2ec44fa2b580004be24f90e001fa33f6a8d3e4503e17c7"
+    },
+    "c65912ba6a77bc4b727d96238b7b97c8b8a3b09a5df32a5d3bc71bfbc1ee9002": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec",
+      "supervisor-control.mjs": "cdd33cb152d00e62da2ec44fa2b580004be24f90e001fa33f6a8d3e4503e17c7"
+    },
+    "bebde5fe4e8b9589e8b0df11dbc9cac4d0fb90dc1ddf142ba2f095611f9a8086": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "33cfe531a54de1d1ddf46b56c414135c9ca2e6e237be012e1e9ea9276c0d2cbf": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "240643035ea18a8e96f948a03c8658c00d420c0fe1879c99188845637327abff": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "6a3d4eabd7574defac698d345bedbf5ff7fd0046f48131ae369eaf2bbc4169b4": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "f3ae78f6e3d66dc0ae57c90c4380ca6771e62bf19e39468b6cdd0abebdf0c204": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "4a83e409ee03f2bc26c90370a17adad12349681bc548e5ba6674497cbdf796b7": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "ce77df9d0dd61d56696af558da488f6aed373e8e9cf975034df97fcdbe9fb468": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "6881a6a480c878b26d3f39ef9119df3062b22fe615dec71e14dd06073ede8f38",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "9bd5561265602170520f25a31a374dfefb42945e3d454ddd019fbb2aaa5184ec"
+    },
+    "1c21ad1d122d1cafb657a6fa077ccb46ea84fe68e35de495b0e8ebb24fdd7b8c": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "f6221beb5585c81c3c9a36220c58645e9dc85158825d0d9d415f5d015da3ebed",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe"
+    },
+    "ccea81a8a0b191be1a9107989c9b97fc28184fc2009fdff7e8709dec7cab6c61": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "c18f091a6ffe53b4fbbcd8ab14315cf193733b462b08fac3132fad647a88b916"
+    },
+    "b903ca8f55f92992d9a70d2a138ffe7378ac94a4fec2c9075e5d10c6d4f19dab": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "bbe6d4d30adc094ea41156817b8c84bc961f70972db9fcac8ab1ce8bc58812b4"
+    },
+    "d624ecd2e40943a73a1205b45f1cb52f81de2a1fc63c63d664da190d87afc0b1": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "66a72034a8c676e9b7a04b045ca16d2efa5f9f959ca44a4f2fba88917947a55f"
+    },
+    "761ce0b3fb067b44519b742383ef512bdc9b6b9c536b6a721f986b069ae8316f": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "66a72034a8c676e9b7a04b045ca16d2efa5f9f959ca44a4f2fba88917947a55f"
+    }
+  },
   "artifacts": {
-    "peer-pairing-store.mjs": "4ba4c1b24a118872bba611c57f7133aa0160f253e337f941ec8d9fd12daa9d3a",
+    "peer-pairing-store.mjs": "27db96425f3c2cd584845314a6082dfc4a3743a8e7a65b19853b2a389390b137",
     "peer-pairing-value.mjs": "1875307d15bd7a50d2499d89112b75627291b37d85d82b2d8a3886d860024ae0",
-    "peer-pairing-transport.mjs": "da98ae935b3f8eb5d458d9da617b91f6ac8392e16f2dabeface7fb680a40a359",
+    "peer-pairing-transport.mjs": "68c0930ff43cff6286e5660adab6993d1a9da4e8c6767ea517cdec5029bb4d3a",
     "identity-error.mjs": "156d83bf157cb18b92038e2ae13d598f4343328781b81f66aba5590b8dc54be1",
     "opaque-secret.mjs": "6cf425edfedb82adc7d38e156162da08337d2f66cf9d50aeb44eee901ae52959",
     "peer-session-denial.mjs": "183ae3dd44d448b16783c428402d01e81a296c0b59e8fb787639645a2df998d8",
-    "session-denial-delivery.mjs": "33e53599b4ba23bb4a3254262b74b67094e91da81a037a57b989c59c9d14802f",
+    "session-denial-delivery.mjs": "39e5fc1ed5ac95c1bc5e365efa13f7f8806634be690911e303284ff175d85e4e",
     "peer-device-bindings.mjs": "4e9264591deb080842814eb34eadaa2d7ba5af1d40edb432b7a52e514875208b",
     "peer-device-events.mjs": "3911e71dacb9314d818a99f1147f1ebcb001223dd39e76c822e833761b608b98",
-    "peer-event-websocket.mjs": "5b8e933c97b5f2b52fb934fbd75b96d3ba27f946828113a53ef0500e2fe6cbe9"
+    "peer-event-websocket.mjs": "831212a5e4eb95d0661431b279858fe3e9f1a95b50fd697fbfec1e9fa222e359",
+    "peer-automation-approval.mjs": "86942183d543717f37a45b636dbc1a0f4b9075a28327b55b20abd38ddb5f6f66",
+    "peer-run-approval-proposal.mjs": "94b10f19ce18ea06aba31867d146e47db36de23211ba92f096ad92a71d47d0d4",
+    "peer-run-approval-endorsement.mjs": "40210821535f1d9eb7f22418f5db449c9925fa6816f002205c60a10b70814120",
+    "peer-run-approval.mjs": "01f1dd2e403ddb6b30b40aa4e4a5d014d8fd7660c6fb988d387c5580c6fc733a",
+    "peer-run-initiator.mjs": "3670438c0f5a2b1883836340cd79a68219c42193a41b7fad883a7f5e88b91b5c",
+    "peer-run-arm-plan.mjs": "426b72c5062430fb03299bd14e67e0c745fb07b460f29c4a60068abdd535a20b",
+    "peer-run-preparation.mjs": "7b1dc959dda6b65cd6243902914a74acceb7b107432140986c229aefad27d9bc",
+    "peer-run-approval-protection.mjs": "191e5a4d6bbb4400fee60aaf956561f7843eb79f4530244c90326a7a16d3f5b7"
   },
   "auth_clock_value_sha256": "36b3e04d8018674d86ac118f99c31dbfa03e11956f588775c1eb90d22b3c7868",
   "license_sha256": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6"

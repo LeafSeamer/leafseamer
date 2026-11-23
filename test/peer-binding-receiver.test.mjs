@@ -34,3 +34,14 @@ test('显式释放仅销毁对应句柄并归还容量，不能重用原读取�
  assert.throws(()=>f.receiver.current(handles[0]),{code:'peer_binding_handle'});assert.ok(f.receiver.current(handles[1]));
  const replacement=await f.receiver.prepare(f.query);assert.notEqual(replacement,handles[0]);assert.ok(f.receiver.current(replacement));
 });
+test('批准正文匹配读取沿用原截止及配对，过期后不恢复',async t=>{
+ const f=fixture(t),handle=await f.receiver.prepare(f.query),value=f.receiver.current(handle);
+ const expected={pairing_ref:value.pairing_ref,bundle_digest:value.bundle_digest};
+ const query={...f.query,expected_registration_ref:value.reply.bundle.registration_ref};
+ await assert.rejects(f.receiver.prepareMatch(query,{...expected,bundle_digest:digest('other')}),{code:'peer_binding_changed'});
+ const verify=await f.receiver.prepareMatch(query,expected),second=await f.receiver.prepareMatch(query,expected);
+ f.record.revision='5';assert.throws(()=>second(false),{code:'peer_binding_expired'});f.record.revision='4';
+ f.state.tick=2000000000n;assert.doesNotThrow(()=>verify(true));
+ f.state.tick=2000000001n;assert.throws(()=>verify(true),{code:'peer_binding_expired'});
+ f.state.tick=2000000000n;assert.throws(()=>verify(true),{code:'peer_binding_expired'});
+});

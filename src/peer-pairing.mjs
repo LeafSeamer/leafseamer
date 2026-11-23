@@ -2,8 +2,9 @@ import {peerPairingStore} from './runtime/peer-pairing-store.mjs';
 import {pairingNeed as need,pairingUuid as uuid} from './runtime/peer-pairing-value.mjs';
 import {canonical,digest,checked} from './runtime/auth-clock-value.mjs';
 import {clockInteger} from './runtime/native-clock.mjs';
+import {firstPairingEnrollment} from './first-pairing-enrollment.mjs';
 
-// 只接收可信装配提供的远端人员核验器，不签发人员身份，不提供首次配对认证绕过。
+// 常规管理始终经远端人员核验。首次配对另从本机导入原件取得具名授权。
 export function seamerPeerPairings({db,service,bootId,isOpen,clock,issuer,management=null}){
  need(issuer&&Object.keys(issuer).sort().join(',')==='issuer_epoch,issuer_id,service_id','issuer_configuration');
  for(const value of Object.values(issuer))uuid(value);need(issuer.service_id!==service.service_id,'issuer_configuration');
@@ -24,16 +25,19 @@ export function seamerPeerPairings({db,service,bootId,isOpen,clock,issuer,manage
   uuid(session.principal_id);uuid(session.session_id);
   need(now.lower>=clockInteger(session.not_before_ns)&&now.upper<clockInteger(session.expires_ns)&&now.upper<clockInteger(session.recent_before_ns),'management_denied');
   const actor={principal_id:session.principal_id,principal_kind:'human',issuer_id:session.issuer_id,issuer_epoch:session.issuer_epoch};
+  remember(actor);
+  return {session:JSON.parse(canonical(session))};
+ }
+ function remember(actor){
   const prior=db.prepare('SELECT body_jcs,body_digest FROM peer_pairing_manager WHERE principal_id=?').raw().get(actor.principal_id);
   if(prior)need(prior[0]===canonical(actor)&&prior[1]===digest(actor),'management_identity_conflict');
   else need(db.prepare('INSERT INTO peer_pairing_manager VALUES(?,?,?,?,?)').run(actor.principal_id,actor.issuer_id,actor.issuer_epoch,canonical(actor),digest(actor)).changes===1,'storage');
-  return {session:JSON.parse(canonical(session))};
  }
  const authority={current(principal){
   source();const grant=checked(management.current(principal,fixedIssuer));
   need(grant.issuer_id===fixedIssuer.issuer_id&&grant.issuer_epoch===fixedIssuer.issuer_epoch&&Array.isArray(grant.permissions),'management_denied');return grant;
  }};
- return peerPairingStore({db,service,bootId,time,authenticated,authority,
+ return peerPairingStore({db,service,bootId,time,authenticated,authority,firstPairing:firstPairingEnrollment({db,service,issuer:fixedIssuer,remember}),
   writer(work){live();need(!db.inTransaction,'outer_transaction');return db.transaction(work).immediate();},
   issuerIdentity:()=>[fixedIssuer.issuer_id,fixedIssuer.issuer_epoch],
   humanPrincipal(id){const row=db.prepare('SELECT body_jcs,body_digest FROM peer_pairing_manager WHERE principal_id=?').raw().get(id);if(!row)return false;

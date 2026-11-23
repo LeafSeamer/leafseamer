@@ -16,11 +16,14 @@ function fixture(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-binding-approval-'));initializeStorage(dir);const service=migrateStorage(dir,'3'),scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id};
  const actor={issuer_id:id(),issuer_epoch:id(),principal_id:id(),principal_kind:'human'},authority={authorizeInTransaction({operation_id,definition_id,context_id}){return {scope,actor,context_id,request_epoch:service.request_epoch,operation_id,definition_id,authorization_digest:digest('synthetic-authority')};}};
  const store=openStorage(dir,{draftAuthority:authority});const draft=store.drafts.create(null,{context:{context_id:'context',idempotency_key:'create'},content:{program:source().program,selections:[],policy_ref:{kind:'policy',scope,object_id:'policy',revision:'1',digest:digest({})}},metadata:{name:'绑定批准事务',description:'',layout:{}}});store.close();
- let db,api;const state={onAuthority:null,onSource:null,onPrepare:null,prepared:0,released:0,paired:true},bundle={registration_ref:{id:'synthetic-registration'},bindings:[]},prepared={pairing_ref:{id:id(),revision:'4',digest:digest('pairing')},request:{scope:{synthetic:true}},reply:{bundle},bundle_digest:digest(bundle)};
+ let db,api;const state={onAuthority:null,onSource:null,onPrepare:null,prepared:0,released:0,paired:true,event:null,eventReleased:0},bundle={registration_ref:{id:'synthetic-registration'},bindings:[]},prepared={pairing_ref:{id:id(),revision:'4',digest:digest('pairing')},request:{scope:{synthetic:true}},reply:{bundle},bundle_digest:digest(bundle)};
  const proof=definition_id=>{state.onAuthority?.();return {scope,actor,definition_id,authorization_digest:digest('synthetic-current-authority')};};
  function open(){db=new Database(path.join(dir,'seamer.sqlite'));db.pragma('foreign_keys=ON');db.pragma('recursive_triggers=ON');api=bindingApprovalStore({db,service,isOpen:()=>db.open,
   authority:{bindingApprovalInTransaction(_handle,definition_id){return proof(definition_id);},bindingApprovalLookupInTransaction(_handle,definition_id){return proof(definition_id);}},
-  receiver:{async prepare(request){assert.equal(db.inTransaction,false);state.prepared++;await state.onPrepare?.(request);return {};},release(){state.released++;},currentInTransaction(){state.onSource?.();return structuredClone(prepared);}},pairings:{requireActivatedInTransaction(){assert.equal(state.paired,true,'pairing_revoked');}}});}
+  receiver:{async prepare(request){assert.equal(db.inTransaction,false);state.prepared++;await state.onPrepare?.(request);return {};},release(){state.released++;},currentInTransaction(){state.onSource?.();return structuredClone(prepared);}},
+  eventReceiver:{async prepare(){assert.equal(db.inTransaction,false);if(!state.event)throw Error('event_offline');return {};},
+   release(){state.eventReleased++;},currentInTransaction(){assert.ok(db.inTransaction);return structuredClone(state.event);}},
+  pairings:{requireActivatedInTransaction(){assert.equal(state.paired,true,'pairing_revoked');}}});}
  open();t.after(()=>{if(db.open)db.close();assert.equal(path.dirname(path.resolve(dir)),path.resolve(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:50});});
  const request={request_id:id(),approval_id:id(),definition_id:draft.definition_id,expected_bundle_digest:prepared.bundle_digest};
  return {get db(){return db;},get api(){return api;},reopen(){db.close();open();},state,prepared,actor,request,query:{binding_id:id(),scope:{synthetic:true},device_id:id(),expected_registration_ref:null},counts:()=>tables.map(name=>db.prepare('SELECT count(*) FROM '+name).pluck().get())};
@@ -75,4 +78,16 @@ test('异步调用固定原请求，失败读取不写入批准',async t=>{
  f.state.onPrepare=received=>{assert.deepEqual(received,query);f.request.approval_id=id();f.query.device_id=id();};
  const approved=await f.api.approveCurrent(null,f.query,f.request);assert.equal(approved.approval_id,original.approval_id);
  const before=f.counts();f.state.onPrepare=()=>{throw new Error('offline');};await assert.rejects(f.api.approveCurrent(null,f.query,{...original,request_id:id(),approval_id:id()}),/offline/);assert.deepEqual(f.counts(),before);
+});
+test('事件候选要求同一设备会话并清理两个来源句柄，读取不写批准',async t=>{
+ const f=fixture(t),request={...f.query,expected_source_ref:null};
+ const scope={authority_service_id:id(),database_instance_id:id()};
+ f.prepared.reply.bundle.registration={scope,device_id:f.query.device_id,device_session_id:id()};
+ const candidate=()=>f.api.eventCandidate(null,f.request.definition_id,request);
+ await assert.rejects(candidate(),/event_offline/);
+ assert.equal(f.state.released,1);assert.equal(f.state.eventReleased,0);
+ f.state.event={pairing_ref:f.prepared.pairing_ref,request:f.prepared.request,source_ref:{scope},reply:{bundle:{fault:null,
+  registration:{binding_ref:{target:{kind:'device',device_id:f.query.device_id}},qualification:{device_id:f.query.device_id,device_session_id:id()}}}}};
+ await assert.rejects(candidate(),{code:'binding_approval_event_source_changed'});
+ assert.equal(f.state.released,2);assert.equal(f.state.eventReleased,1);assert.deepEqual(f.counts(),[0,0,0,0]);
 });

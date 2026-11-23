@@ -45,7 +45,9 @@ export function createPeerIdentityReceiver({service,clock,pairings,transport,iss
     }else need(data.recent_authentication===null,'recent_binding');
     const handle=Object.freeze({}),fresh=bounded(started+BigInt(snapshot.fresh_for_ms)*1000000n),entry={handle,binding_id,record,started,deadline:fresh<deadline?fresh:deadline,
      domain:structuredClone(start.runtime_domain_ref),notBefore:utc(snapshot.validity.not_before),expires:utc(snapshot.validity.expires_at),
-     value:freeze({issuer_service_id:fixed.service_id,issuer_boot_id:response.body.service_boot_id,token_binding_digest:'sha256:'+crypto.createHash('sha256').update('LeafSeamer/received-token/1\0'+token).digest('hex'),snapshot:structuredClone(snapshot),recent_authentication:structuredClone(data.recent_authentication)})};
+     value:freeze({issuer_service_id:fixed.service_id,issuer_boot_id:response.body.service_boot_id,
+      token_id:/^v1\.([0-9a-f-]{36})\.[A-Za-z0-9_-]{43}$(?![\s\S])/.exec(token)?.[1]??null,
+      token_binding_digest:'sha256:'+crypto.createHash('sha256').update('LeafSeamer/received-token/1\0'+token).digest('hex'),snapshot:structuredClone(snapshot),recent_authentication:structuredClone(data.recent_authentication)})};
     need(entry.notBefore<entry.expires,'time');handles.set(handle,entry);entries.add(entry);current(handle);
     try{need(watermarks.observe({issuer:fixed,revision:snapshot.issuer_revision,snapshot_id:snapshot.snapshot_id,snapshot_digest:digest(snapshot),issuer_boot_id:response.body.service_boot_id,
      pairing_ref:{id:record.binding_id,revision:record.revision,digest:record.digest}})===snapshot.issuer_revision,'watermark_commit');}

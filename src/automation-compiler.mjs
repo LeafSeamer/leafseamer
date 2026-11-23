@@ -20,6 +20,11 @@ export function compileProgram(source){
  const input={...Object.fromEntries(sourceKeys.map(key=>[key,descriptors[key].value])),dsl_version:'automation-program/0.1.0-draft.1',compiler_version:'seamer-program-1',graph_digest:'sha256:'+'0'.repeat(64)};
  validateAutomationModel('CompiledProgram',input);
  const compiled=structuredClone(input),expressions=expressionCompiler(compiled.input_bindings),actions=new Map(),steps=new Map(),edges=new Map(),branches=[],conditions=new Map(),plans=new Map();
+ const inputUses=new Map(),usedActions=new Set(),resources=Object.fromEntries(footprintKeys.map(key=>[key,new Set()]));
+ function useInput(id,usage){
+  const uses=inputUses.get(id)??new Set();
+  uses.add(usage);inputUses.set(id,uses);
+ }
  let comparisons=0;
  const intersects=(a,b)=>{need(++comparisons<=1048576,'resource_budget');return overlaps(a,b);};
  const aliases=compiled.alias_table.entries;
@@ -46,6 +51,11 @@ export function compileProgram(source){
  function trigger(id,condition,key){
   const binding=expressions.binding(id);need(binding&&binding.source==='event','trigger_binding');const result=expressions.compile(condition,{path:key});
   need(result.references.every(item=>item.source!=='step_result'),'trigger_result');conditions.set(key,result);
+  useInput(id,'trigger');
+  for(const reference of result.references){
+   useInput(reference.binding_id,'condition');
+   for(const resource of reference.reads)resources.reads.add(physical(resource));
+  }
  }
  const program=compiled.program;
  if(program.kind==='rule'){
@@ -70,12 +80,17 @@ export function compileProgram(source){
   need(predecessor&&consumer&&predecessor.branch===consumer.branch&&predecessor.rank<consumer.rank,'dependency_order',to);add(from,to,kind);
  }
  function references(expression,consumer,kind,reads){
-  for(const reference of expression.references){reads.push(...reference.reads.map(physical));if(reference.source==='step_result')dependency(reference.producer_step_id,consumer,kind);}
+  for(const reference of expression.references){
+   reads.push(...reference.reads.map(physical));
+   useInput(reference.binding_id,kind==='guard'?'guard':'parameter');
+   if(reference.source==='step_result')dependency(reference.producer_step_id,consumer,kind);
+  }
  }
  for(const [id,info]of steps){
   const step=info.step;for(const predecessor of step.depends_on)dependency(predecessor,id,'requires_success');
   if(step.kind==='delay'){info.footprint=Object.fromEntries(footprintKeys.map(key=>[key,[]]));continue;}
   const action=actions.get(step.action_binding_id);need(action,'action_binding',id);
+  usedActions.add(step.action_binding_id);
   need(step.failure_policy!=='continue_if_independent'||!step.required,'required_continue',id);
   const footprint=Object.fromEntries(footprintKeys.map(key=>[key,action.binding.footprint[key].map(physical)]));
   const guard=expressions.compile(step.guard,{path:id+'/guard'});references(guard,id,'guard',footprint.reads);
@@ -88,6 +103,7 @@ export function compileProgram(source){
    references(value,id,'data',footprint.reads);parameters.push({pointer:parameter.target_pointer,value});
   }
   info.footprint=footprint;plans.set(id,{guard,parameters});
+  for(const key of footprintKeys)for(const path of footprint[key])resources[key].add(path);
  }
  // 所有足迹参与静态依赖；complete 字段和内容摘要不能替代权威批准。
  for(const members of branches)for(let i=0;i<members.length;i++){
@@ -104,9 +120,23 @@ export function compileProgram(source){
  const orderedEdges=[...edges.values()].sort((a,b)=>compare(a.from_step_id,b.from_step_id)||compare(a.to_step_id,b.to_step_id)||compare(a.edge_kind,b.edge_kind));
  const graph=freeze({graph_version:'automation-graph/1',nodes:[...steps.keys()].sort(compare),edges:orderedEdges,alias_table_ref:compiled.alias_table.ref});
  compiled.graph_digest=hash(graph);validateAutomationModel('CompiledProgram',compiled);freeze(compiled);
+ const dependencies=freeze({
+  inputs:[...inputUses.keys()].sort(compare).map(id=>{
+   const {binding_id,source,authority_id,registration_ref,schema_ref,producer_step_id}=expressions.binding(id);
+   return {binding_id,source,authority_id,registration_ref,schema_ref,producer_step_id,uses:[...inputUses.get(id)].sort(compare)};
+  }),
+  actions:[...usedActions].sort(compare).map(id=>{
+   const binding=actions.get(id).binding;
+   const {binding_id,authority_id,controller_id,device_id,provider_id,capability_id,registration_ref,catalog_ref,module_ref,
+    parameter_schema_ref,result_schema_ref}=binding;
+   return {binding_id,authority_id,controller_id,device_id,provider_id,capability_id,registration_ref,catalog_ref,module_ref,
+    parameter_schema_ref,result_schema_ref,footprint_ref:binding.footprint.evidence_ref,binding_digest:hash(binding)};
+  }),
+  resources:Object.fromEntries(footprintKeys.map(key=>[key,[...resources[key]].sort(compare)]))
+ });
  const adjacency=new Map([...steps.keys()].map(id=>[id,new Set()]));for(const edge of orderedEdges)adjacency.get(edge.from_step_id).add(edge.to_step_id);
  return Object.freeze({compiled,graph,program_digest:hash(compiled),bindings_digest:hash({input_bindings:compiled.input_bindings,action_bindings:compiled.action_bindings,alias_table:compiled.alias_table}),
-  approved:false,runtime_ready:false,condition:key=>conditions.get(key),stepPlan:id=>{const plan=plans.get(id);return plan?freeze(plan):null;},
+  dependencies,approved:false,runtime_ready:false,condition:key=>conditions.get(key),stepPlan:id=>{const plan=plans.get(id);return plan?freeze(plan):null;},
   parameterExecution({snapshots,schemas}){return createParameterExecution({compiled,plans,steps,snapshots,schemas});},
   successors(id){need(steps.has(id),'step_missing');const seen=new Set(),pending=[...adjacency.get(id)];while(pending.length){const next=pending.pop();if(seen.has(next))continue;seen.add(next);pending.push(...adjacency.get(next));}return Object.freeze([...seen].sort(compare));}
  });

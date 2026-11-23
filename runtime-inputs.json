@@ -5,7 +5,7 @@
   "files": {
     "src/runtime/auth-clock.mjs": {
       "source": "src/auth-clock.mjs",
-      "sha256": "15eeb110542e0c102f374aa0fc72cd79d9548a650d7bc764d5d15238751e8c90"
+      "sha256": "fc68a5db1710c19c2fd9ec01c67e3858c6e4ea83a8bd5cd07ef09b98ef823242"
     },
     "src/runtime/auth-clock-value.mjs": {
       "source": "src/auth-clock-value.mjs",
@@ -33,6 +33,16 @@
       "binary_sha256": "7044c6e414dc57675176382bc6375d0dd25bea3f5ed85d235d8230c1cd3da7ec",
       "manifest_sha256": "ea6fe2cda1d94814b965a3024017a9bc86feccc051f719e2446febf8c059d0aa",
       "source_cmake_sha256": "2207aa2f76705f10a7a939c3cc7477b14c8e947151277840f011b00674b0b533"
+    }
+  },
+  "first_pairing_runtime": {
+    "first-pairing-authorization.mjs": {
+      "source": "src/first-pairing-authorization.mjs",
+      "sha256": "a685ec5a8124610c6ddce4413bf6ce44087ac62a0802a5ca1ce246ea452ab34c"
+    },
+    "peer-pairing-store.mjs": {
+      "source": "src/peer-pairing-store.mjs",
+      "sha256": "f9d486b7f61e44b4db5e77dc002c19ade88af4eb46eb4b56de6425428637a9db"
     }
   }
 }

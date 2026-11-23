@@ -4,30 +4,135 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import https from 'node:https';
+import {pathToFileURL} from 'node:url';
 import Database from 'better-sqlite3';
-import {initializeStorage,migrateStorage,openStorage} from '../dist/storage.mjs';
-import {startAuthenticationClock} from '../dist/runtime/auth-clock.mjs';
-import {contractSelection as selection} from '../dist/sdk/index.mjs';
+import {peerCertificates} from '../../leafseamer-controller/test/fixtures/peer-certificates.mjs';
+import {packageRoot,publicationMaterial} from './automation-publication-fixture.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {seedLocalPermission} from './local-authorization-fixture.mjs';
 import {source,digest} from './automation-program-fixture.mjs';
+const load=name=>import(pathToFileURL(path.join(packageRoot,'dist',name)));
+const [{initializeStorage,migrateStorage,openStorage},{startAuthenticationClock},{createClient,contractSelection:selection},{startDraftHttp}]=
+ await Promise.all(['storage.mjs','runtime/auth-clock.mjs','sdk/index.mjs','draft-http.mjs'].map(load));
 const id=()=>crypto.randomUUID(),permissions=['auth.manage','auth.read','request.create','request.read','definition.read','definition.edit'];
-function fixture(t,{inject=null,managerExpires='18446744073709551615'}={}){
+function fixture(t,{inject=null,managerExpires='18446744073709551615',managerPermissions=permissions,revision='1',publicationSource=null,schedule=true}={}){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-local-auth-')),service=initializeStorage(dir),issuer={service_id:id(),issuer_id:id(),issuer_epoch:id()},principal=id(),editor=id();
- seedLocalPermission(dir,service,issuer,principal,permissions,{expires_ns:managerExpires});
+ if(revision!=='1')migrateStorage(dir,revision);
+ seedLocalPermission(dir,service,issuer,principal,managerPermissions,{expires_ns:managerExpires});
  if(inject){const db=new Database(path.join(dir,'seamer.sqlite'));try{db.exec(inject);}finally{db.close();}}
  const state={onIdentity:null},handles=new Map(),receiver={currentInTransaction(handle){state.onIdentity?.();assert.ok(handles.has(handle),'unknown handle');return handles.get(handle);}};
  let store,clock,f,authorization;
- function open(){store=openStorage(dir);f=clockFixture(store.authenticationClock.scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});clock=startAuthenticationClock(f.source,store.authenticationClock,f.provider);authorization=store.bindLocalAuthorization({clock,receiver,issuer});}
+ function open(){store=openStorage(dir,{publicationSource});f=clockFixture(store.authenticationClock.scope,null,{sampleWindowPolicy:'authentication-clock-sample/2'});clock=startAuthenticationClock(f.source,store.authenticationClock,f.provider,{schedule});authorization=store.bindLocalAuthorization({clock,receiver,issuer});}
  function close(){clock.stop();store.close();}
  open();t.after(()=>{close();assert.equal(path.dirname(path.resolve(dir)),path.resolve(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:50});});
- function handle(who=principal,scopes=permissions){const key={},now=clock.current(),stamp=ns=>new Date(Number(ns/1000000n)).toISOString(),snapshot={issuer_id:issuer.issuer_id,issuer_epoch:issuer.issuer_epoch,audience:service.service_id,principal_id:who,principal_kind:'human',session_id:id(),session_revision:'1',credential_id:id(),subject_revision:'1',policy_revision:'1',scope_digest:digest({who}),permissions:scopes,state:'active'};
+ function handle(who=principal,scopes=permissions,kind='human'){const key={},now=clock.current(),stamp=ns=>new Date(Number(ns/1000000n)).toISOString(),snapshot={issuer_id:issuer.issuer_id,issuer_epoch:issuer.issuer_epoch,audience:service.service_id,principal_id:who,principal_kind:kind,session_id:id(),session_revision:'1',credential_id:id(),subject_revision:'1',policy_revision:'1',scope_digest:digest({who}),permissions:scopes,state:'active'};
   handles.set(key,{issuer_service_id:issuer.service_id,snapshot,token_binding_digest:digest(id()),recent_authentication:{session_id:snapshot.session_id,session_revision:'1',not_before:stamp(BigInt(now.lower_ns)-1000000000n),expires_at:stamp(BigInt(now.upper_ns)+60000000000n)}});return key;}
  const actor=handle(),editorHandle=handle(editor),request={request_id:id(),principal_id:editor,principal_kind:'human',expected_revision:null,permissions:['request.create','request.read','definition.read','definition.edit'],definition_scope:{kind:'all',definition_ids:[]},not_before_ns:'1',expires_ns:'18446744073709551615'};
  const makeContext=(h=editorHandle,max=4)=>authorization.createRequestContext(h,{audience:service.service_id,selection,operations:['createDefinition','getDraft','updateDraft','updateDefinitionMetadata'],ttl_ms:60000,max_unique_requests:max});
  const draft=c=>({context:{context_id:c.context_id,idempotency_key:id()},content:{program:source().program,selections:[],policy_ref:{kind:'policy',scope:{authority_service_id:service.service_id,database_instance_id:service.database_instance_id},object_id:'policy',revision:'1',digest:digest({})}},metadata:{name:'本地授权测试',description:'',layout:{}}});
  return {dir,service,issuer,principal,editor,actor,editorHandle,handles,handle,request,makeContext,draft,close,open,state,get store(){return store;},get auth(){return authorization;},advance:ns=>f.source.advance(ns)};
 }
+test('HTTPS 登记与查回未布防运行，固定发布制品及本地接收基线',async t=>{
+ const scopes=[...permissions,'definition.publish','run.manage','run.read'];
+ let material;
+ const f=fixture(t,{revision:'5',managerPermissions:scopes,schedule:false,publicationSource:{
+  async resolve(){return structuredClone(material.snapshot);},
+  assertCurrentInTransaction(){return digest(material.snapshot);}
+ }});
+ const actor=f.handle(f.principal,scopes);
+ const scope={authority_service_id:f.service.service_id,database_instance_id:f.service.database_instance_id};
+ material=publicationMaterial(scope);
+ const prepare=(handle,operations,max=4)=>f.auth.createRequestContext(handle,{audience:f.service.service_id,selection,operations,ttl_ms:60000,max_unique_requests:max});
+ const draftContext=prepare(actor,['createDefinition','publishDefinition']);f.advance(1000000n);
+ const draft=f.store.drafts.create(actor,{context:{context_id:draftContext.context_id,idempotency_key:id()},content:material.content,metadata:{name:'测试运行登记',description:'',layout:{}}});
+ const published=await f.store.publications.publish(actor,draft.definition_id,{context:{context_id:draftContext.context_id,idempotency_key:id()},
+  expected_draft_revision:draft.revision,expected_content_digest:draft.content_digest,expected_selection_digest:draft.selection_digest});
+ const servicePrincipal=id(),serviceScopes=['request.create','run.manage','run.read'];
+ f.auth.replace(actor,{...f.request,request_id:id(),principal_id:servicePrincipal,principal_kind:'service',permissions:serviceScopes,definition_scope:{kind:'selected',definition_ids:[draft.definition_id]}});
+ const serviceActor=f.handle(servicePrincipal,serviceScopes,'service');
+ const certs=peerCertificates(),page='https://controller.invalid',humanToken='v1.'+id()+'.'+'A'.repeat(43),serviceToken='v1.'+id()+'.'+'B'.repeat(43);
+ const handles=new Map([[humanToken,actor],[serviceToken,serviceActor]]);
+ const diagnostic=[];
+ const authorization={...f.auth,createRequestContext(...args){
+  const value=f.auth.createRequestContext(...args);f.advance(1000000n);return value;
+ }};
+ const app=await startDraftHttp({cert:certs.leaves[0].cert,key:certs.leaves[0].key,bindingId:id(),service:f.store.identity,bootId:f.store.serviceBootId,
+  receiver:{async prepare({token}){return handles.get(token);}},authorization,drafts:f.store.drafts,publications:f.store.publications,runs:f.store.runs,allowedOrigins:[page],
+  onFailure(value){diagnostic.push(value);}});
+ t.after(()=>app.close());
+ let headersRead=[],token=humanToken,origin=page,csrf=null;
+ const client=createClient('seamer',selection,packet=>new Promise((resolve,reject)=>{
+  const headers=Object.fromEntries([...packet.headers,['Authorization','Bearer '+token],...(origin?[['Origin',origin]]:[]),...(csrf?[['X-CSRF-Token',csrf]]:[])]);
+  const req=https.request(new URL(packet.target,app.origin),{method:packet.method,headers,ca:certs.ca,agent:false},res=>{
+   const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>{
+    headersRead=Array.from({length:res.rawHeaders.length/2},(_,i)=>[res.rawHeaders[i*2],res.rawHeaders[i*2+1]]);
+    resolve({status:String(res.statusCode),headers:headersRead,body:Buffer.concat(chunks)});
+   });
+  });req.on('error',reject);req.end(packet.body);
+ }));
+ const issue=(operations=['createRun'])=>client.call('createRequestContext',{body:{audience:f.service.service_id,selection,operations,ttl_ms:30000,max_unique_requests:1}});
+ const issued=await issue(['createRun','updateDefinitionMetadata']);assert.equal(issued.status,'201',JSON.stringify(diagnostic));
+ const ctx=issued.body.data,ownCsrf=headersRead.find(([name])=>name.toLowerCase()==='x-csrf-token')?.[1];f.advance(1000000n);
+ const input={context:{context_id:ctx.context_id,idempotency_key:id()},definition_id:draft.definition_id,definition_version:published.definition_version,expected_artifact_ref:published.artifact_ref};
+ const create=(body=input)=>client.call('createRun',{body});
+ assert.equal((await create()).status,'403');
+ csrf=ownCsrf;
+ const {status,body:run}=await create();
+ assert.equal(status,'201',JSON.stringify(diagnostic));assert.equal(run.lifecycle,'disarmed');assert.equal(run.dispatch_eligible,false);
+ assert.equal(run.arm_generation,'0');assert.equal(run.last_receive_seq,'0');assert.equal(run.active_execution_id,null);
+ assert.deepEqual(run.artifact_ref,published.artifact_ref);
+ assert.equal(run.dependency_digest,undefined);
+ const dependencies=f.store.runs.dependencies(actor,run.run_id);
+ assert.deepEqual(dependencies.body.artifact_ref,published.artifact_ref);
+ assert.equal(dependencies.body.program_digest,published.program_digest);
+ assert.equal(dependencies.body.dependencies.inputs[0].binding_id,'trigger');
+ assert.deepEqual(dependencies.body.dependencies.inputs[0].uses,['trigger']);
+ assert.equal(dependencies.body.dependencies.actions[0].binding_id,'action');
+ const actorWithoutRunRead=f.handle(f.principal,scopes.filter(permission=>permission!=='run.read'));
+ assert.throws(()=>f.store.runs.dependencies(actorWithoutRunRead,run.run_id),{code:'local_authorization_denied'});
+ const duplicate=await create();assert.equal(duplicate.status,'201',JSON.stringify(diagnostic));assert.deepEqual(duplicate.body,run);
+ assert.equal((await create({...input,expected_artifact_ref:{...input.expected_artifact_ref,digest:digest('wrong')}})).status,'409');
+ assert.equal((await create({...input,context:{...input.context,idempotency_key:id()}})).status,'429');
+ assert.throws(()=>f.store.drafts.updateMetadata(actor,draft.definition_id,{
+  context:{context_id:ctx.context_id,idempotency_key:id()},expected_metadata_revision:draft.metadata_revision,metadata:{...draft.metadata,name:'额度已占用'}
+ }),{code:'local_authorization_context_capacity'});
+ const get=run_id=>client.call('getRun',{path:{run_id}});
+ assert.deepEqual((await get(run.run_id)).body,run);
+ const lookup={...input.context,operation_id:'createRun'};
+ const recovered=await client.call('lookupAutomationRequest',{body:lookup});
+ assert.equal(recovered.status,'200');assert.deepEqual(recovered.body.result,{kind:'RunRecord',value:run});
+ assert.equal(recovered.body.request_digest,digest({version:'automation-lifecycle/0.1.0-draft.1',operation_id:'createRun',definition_id:draft.definition_id,
+  request:{definition_version:published.definition_version,expected_artifact_ref:published.artifact_ref}}));
+ token=serviceToken;origin=null;csrf=null;
+ const serviceContext=(await issue()).body.data;f.advance(1000000n);
+ const outside={...input,definition_id:id(),context:{context_id:serviceContext.context_id,idempotency_key:id()}};
+ assert.equal((await create(outside)).status,'404');
+ const serviceRun=await create({...input,context:{context_id:serviceContext.context_id,idempotency_key:input.context.idempotency_key}});
+ assert.equal(serviceRun.status,'201');assert.equal(serviceRun.body.dispatch_eligible,false);assert.notEqual(serviceRun.body.run_id,run.run_id);
+ assert.deepEqual((await get(serviceRun.body.run_id)).body,serviceRun.body);
+ assert.deepEqual(f.store.runs.dependencies(serviceActor,serviceRun.body.run_id),dependencies);
+ assert.equal((await client.call('lookupAutomationRequest',{body:lookup})).status,'403');
+ await app.close();f.close();assert.equal(migrateStorage(f.dir,'6').schema_revision,'6');f.open();
+ assert.deepEqual(f.store.runs.get(actor,run.run_id),run);
+ assert.deepEqual(f.store.runs.dependencies(actor,run.run_id),dependencies);
+ assert.deepEqual(f.store.runs.lookup(actor,lookup),recovered.body);
+ assert.throws(()=>f.store.runs.create(actor,input),{code:'local_authorization_context'});
+ f.close();
+ const db=new Database(path.join(f.dir,'seamer.sqlite'));
+ try{
+  const rows=db.prepare('SELECT body_jcs FROM automation_run_creation').pluck().all().map(JSON.parse);
+  assert.equal(rows.length,2);
+  assert.equal(db.prepare('SELECT count(*) FROM definition_program_dependencies').pluck().get(),1);
+  assert.equal(db.prepare('SELECT count(*) FROM automation_run_approval_proposal').pluck().get(),0);
+  assert.throws(()=>db.prepare('UPDATE definition_program_dependencies SET body_digest=?').run(digest('changed')),/immutable_program_dependencies/);
+  assert.throws(()=>db.prepare('DELETE FROM definition_program_dependencies').run(),/immutable_program_dependencies/);
+  assert.ok(rows.every(row=>row.run.dependency_digest===dependencies.digest));
+  assert.ok(rows.every(row=>row.run.last_receive_cursor.receive_sequence==='0'&&row.run.last_receive_seq===undefined));
+  assert.ok(rows.every(row=>row.run.last_receive_cursor.ingest_epoch===db.prepare('SELECT ingest_epoch FROM event_ingest_epoch').pluck().get()));
+ }finally{db.close();}
+});
+
 test('本地批准与签发方权限取交集，真实草稿同writer使用凭据绑定context和额度',t=>{
  const f=fixture(t);assert.throws(()=>f.makeContext(),{code:'local_authorization_missing'});
  const op=f.auth.replace(f.actor,f.request);assert.deepEqual(f.auth.replace(f.actor,f.request),op);

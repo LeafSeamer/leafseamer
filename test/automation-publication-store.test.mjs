@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {digest} from './automation-program-fixture.mjs';
 import {setup,inspect,counts} from './automation-publication-fixture.mjs';
+import {automationPublicationStore} from '../dist/automation-publication-store.mjs';
 test('编译、证明、发布原件及请求结果原子保存，重启查原不重新解析来源',async t=>{
  const f=setup(t,{optional:true}),result=await f.publish();assert.equal(result.definition_version,'1');assert.equal(result.source_draft_revision,'1');
  const artifact=f.store.publications.getArtifact(null,f.draft.definition_id,'1'),program=f.store.publications.getProgram(null,f.draft.definition_id,'1');
@@ -64,6 +65,28 @@ test('并发同 key 只提交一份结果，保留各自预留且不重新消耗
 test('不可变发布原件的摘要损坏在历史读取时拒绝',async t=>{
  const f=setup(t);await f.publish();f.store.close();inspect(f.dir,db=>db.exec("DROP TRIGGER definition_publication_no_update; UPDATE definition_publication SET bundle_digest='changed'"));f.reopen();
  assert.throws(()=>f.store.publications.getArtifact(null,f.draft.definition_id,'1'),{code:'publication_integrity'});
+});
+test('已校验的发布原件仍逐次检查关联索引，原文字节变化必须重新验证',async t=>{
+ const f=setup(t,{optional:true});const result=await f.publish();f.store.close();
+ inspect(f.dir,db=>{
+  const publications=automationPublicationStore({db,service:{...f.identity,schema_revision:'2'},isOpen:()=>db.open});
+  const read=()=>db.transaction(()=>publications.versionForRunInTransaction(result.definition_id,result.definition_version).result).immediate();
+  assert.deepEqual(read(),result);
+  db.exec('DROP TRIGGER definition_publication_proof_no_update');
+  const original=db.prepare('SELECT proof_digest FROM definition_publication_proof').pluck().get();
+  const update=db.prepare('UPDATE definition_publication_proof SET proof_digest=?');
+  assert.equal(update.run(digest('altered proof index')).changes,1);
+  assert.throws(read,{code:'publication_integrity'});
+  assert.equal(update.run(original).changes,1);
+  assert.deepEqual(read(),result);
+  db.exec(`DROP TRIGGER definition_request_no_update;
+   UPDATE definition_request SET result_jcs=result_jcs||' ' WHERE operation_id='publishDefinition'`);
+  assert.throws(read,{code:'publication_integrity'});
+  db.exec("UPDATE definition_request SET result_jcs=rtrim(result_jcs) WHERE operation_id='publishDefinition'");
+  assert.deepEqual(read(),result);
+  db.exec("DROP TRIGGER definition_publication_no_update; UPDATE definition_publication SET bundle_jcs=bundle_jcs||' '");
+  assert.throws(read,{code:'publication_integrity'});
+ });
 });
 
 for(const table of ['definition_version_reservation','definition_publication','definition_publication_proof','definition_request','definition_notification'])test('静默遗漏写入也拒绝发布：'+table,async t=>{

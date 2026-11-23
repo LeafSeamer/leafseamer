@@ -1,0 +1,41 @@
+import {createHash} from 'node:crypto';
+import {timeProviderPollStore} from './time-provider-polls.mjs';
+import {timeProviderCaptureStore} from './time-provider-capture.mjs';
+import {referenceTimeAnchorStore} from './reference-time-anchor.mjs';
+import {referenceTimeScheduler} from './reference-time-scheduler.mjs';
+import {canonical} from './runtime/auth-clock-value.mjs';
+
+const require=(condition,code)=>{if(!condition)throw new Error(code);};
+
+export function openReferenceSampling({db,identity,bootId,binding,supervision,collector,authentication,authority}){
+ const {sourceSlot,limits,readSource,readEndpoint,captureProtection,referenceAuthority}=authority;
+ require(typeof readEndpoint==='function'&&typeof referenceAuthority?.readBundleOriginals==='function','reference_sampling_authority');
+ let closing;
+ const assertCurrent=()=>{
+  require(!closing&&db.open,'reference_sampling_closed');
+  supervision.assertCurrent();collector.assertCurrent();
+ };
+ assertCurrent();
+ const polls=timeProviderPollStore(db,bootId,binding,{limits,readSource,readAuthentication:authentication.referenceTimeSample,assertCurrent,
+  observeRetirement:supervision.observeTimeProviderRetirement,assertRetirement:supervision.assertTimeProviderRetirement},true,true,true);
+ const anchors=referenceTimeAnchorStore(db,bootId,binding,{...referenceAuthority,sourceSlot,readContext:polls.referenceContext});
+ const archive=timeProviderCaptureStore(db,identity,captureProtection,anchors);
+ const scheduler=referenceTimeScheduler({sourceSlots:[sourceSlot]},{plan:polls.schedulePlan,recover:polls.recover,
+  collect(slot,pollId,facts){
+   return collector.collect(()=>{
+    assertCurrent();
+    const endpoint=canonical(readEndpoint(Object.freeze({...facts.endpoint_ref})));
+    require(typeof endpoint==='string'&&Buffer.byteLength(endpoint)<=12000&&
+     'sha256:'+createHash('sha256').update(endpoint).digest('hex')===facts.endpoint_ref.digest,'reference_sampling_endpoint');
+    archive.assertWritable();
+    const {reservation,digest}=polls.reserve(slot,pollId,facts),attempt=polls.markAttempt({id:pollId,digest});
+    const network=JSON.parse(endpoint),authorize=()=>polls.authorizeAttempt(attempt);
+    return {reservation,attempt,network,authorize,
+     storeControl:control=>polls.storeControl(attempt,control),releaseControl:polls.releaseControl,
+     archive:candidate=>archive.store({reservation,attempt,candidate,authorize,network}),
+     release:(receipt,acknowledgement)=>archive.release({receipt,acknowledgement,reservation,assertCurrent})};
+   });
+  }});
+ return Object.freeze({receiverReference:anchors.receiverReference,current:anchors.current,status:scheduler.status,start:scheduler.start,
+  close(){return closing??=(async()=>{const drained=scheduler.close();collector.close();await drained;})();}});
+}

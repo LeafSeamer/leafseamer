@@ -5,10 +5,11 @@ import {need,hash,same,checked,derivePublication,validateStaticParameters} from 
 
 const decode=(body,digest)=>{const value=JSON.parse(body);need(canonicalize(value)===body&&hash(value)===digest,'publication_integrity');return freeze(value);};
 const contentRef=value=>({id:crypto.randomUUID(),revision:'1',digest:hash(value)});
-export function automationPublicationStore({db,service,isOpen,authority,source=null}){
+export function automationPublicationStore({db,service,isOpen,authority,source=null,approvedBindings=null}){
  const scope=freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});let pending=0;
+ let lastValidatedBundle=null;
  const available=()=>need(isOpen()&&db.open&&!db.inTransaction,'publication_store_closed');
- const writer=work=>{available();need(['2','3','4'].includes(service.schema_revision),'publication_migration_required');return db.transaction(work).immediate();};
+ const writer=work=>{available();need(Number(service.schema_revision)>=2,'publication_migration_required');return db.transaction(work).immediate();};
  function authorize(authentication,operation_id,definition_id,context_id){
   need(db.inTransaction&&authority?.authorizeInTransaction,'publication_authority_unavailable');
   const proof=authority.authorizeInTransaction({authentication,operation_id,definition_id,context_id,scope});
@@ -34,14 +35,12 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
   need(value.definition_id===id&&same(value.scope,scope),'publication_integrity');
   need(same(proof,authorize(authentication,'getDraft',id,null)),'publication_authorization_changed');return value;
  }
- function historical(id,version){
-  const row=db.prepare(`SELECT p.bundle_jcs,p.bundle_digest,r.source_draft_revision,q.result_jcs,q.result_digest,q.actor_jcs,q.operation_id FROM definition_publication p
-   JOIN definition_version_reservation r USING(definition_id,definition_version) JOIN definition_request q ON q.transaction_id=p.transaction_id WHERE p.definition_id=? AND p.definition_version=?`).raw().get(id,version);
-  need(row,'publication_missing');const bundle=decode(row[0],row[1]),result=checked('LifecyclePublishedVersion',decode(row[3],row[4]));
-  need(row[6]==='publishDefinition'&&bundle.draft.definition_id===id&&bundle.draft.revision===row[2]&&same(bundle.draft.scope,scope)&&same(bundle.result,result),'publication_integrity');
-  const original=db.prepare('SELECT content_jcs,content_digest,selection_digest FROM definition_content WHERE definition_id=? AND revision=?').raw().get(id,row[2]);
-  need(original&&same(decode(original[0],original[1]),bundle.draft.content)&&original[1]===bundle.draft.content_digest&&original[2]===bundle.draft.selection_digest,'publication_integrity');
+ function validatedBundle(text,digest,version){
+  const last=lastValidatedBundle;
+  if(last?.text===text&&last.digest===digest&&last.version===version)return last;
+  const bundle=decode(text,digest);
   checked('LifecycleDraftRecord',bundle.draft);need(hash(bundle.draft.content)===bundle.draft.content_digest&&hash(bundle.draft.content.selections)===bundle.draft.selection_digest,'publication_integrity');
+  checked('LifecyclePublishedVersion',bundle.result);
   const derived=derivePublication(bundle.draft,version,bundle.snapshot);
   need(same(bundle.program,derived.compiled.compiled)&&same(bundle.graph,derived.compiled.graph)&&same(bundle.proofs.map(item=>item.value),derived.proofs),'publication_integrity');
   const artifact=checked('PublishedArtifact',bundle.artifact),manifest={...artifact};delete manifest.manifest_digest;
@@ -49,20 +48,49 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
    same(artifact.proof_refs,bundle.proofs.map(item=>item.ref))&&artifact.publisher_ref.digest===hash(bundle.publisher)&&same(artifact.review_ref,bundle.snapshot.review_ref),'publication_integrity');
   for(const item of bundle.proofs){checked('ContentRef',item.ref);need(item.ref.digest===hash(item.value),'publication_integrity');}
   need(new Set(bundle.proofs.map(item=>item.ref.id)).size===bundle.proofs.length,'publication_integrity');
+  const proofIndex=bundle.proofs.map(item=>[item.ref.id,item.ref.revision,item.ref.digest]).sort((a,b)=>a[0].localeCompare(b[0]));
+  const validated={text,digest,version,bundle,compiled:derived.compiled,proofIndex,
+   draftText:canonicalize(bundle.draft.content),resultText:canonicalize(bundle.result),resultDigest:hash(bundle.result)};
+  // 只复用逐字节匹配的发布原件及纯编译结果。关联行、权限和当前批准仍由调用点读取。
+  if(Buffer.byteLength(text)<=1048576)lastValidatedBundle=validated;
+  return validated;
+ }
+ function historical(id,version,withEvaluator=false){
+  const row=db.prepare(`SELECT p.bundle_jcs,p.bundle_digest,r.source_draft_revision,q.result_jcs,q.result_digest,q.actor_jcs,q.operation_id FROM definition_publication p
+   JOIN definition_version_reservation r USING(definition_id,definition_version) JOIN definition_request q ON q.transaction_id=p.transaction_id WHERE p.definition_id=? AND p.definition_version=?`).raw().get(id,version);
+  need(row,'publication_missing');const {bundle,compiled,proofIndex,draftText,resultText,resultDigest}=validatedBundle(row[0],row[1],version),result=bundle.result;
+  need(row[6]==='publishDefinition'&&bundle.draft.definition_id===id&&bundle.draft.revision===row[2]&&same(bundle.draft.scope,scope)&&
+   row[3]===resultText&&row[4]===resultDigest,'publication_integrity');
+  const original=db.prepare('SELECT content_jcs,content_digest,selection_digest FROM definition_content WHERE definition_id=? AND revision=?').raw().get(id,row[2]);
+  need(original&&original[0]===draftText&&original[1]===bundle.draft.content_digest&&original[2]===bundle.draft.selection_digest,'publication_integrity');
   const index=db.prepare('SELECT proof_id,revision,proof_digest FROM definition_publication_proof WHERE definition_id=? AND definition_version=? ORDER BY proof_id').raw().all(id,version);
-  need(same(index,bundle.proofs.map(item=>[item.ref.id,item.ref.revision,item.ref.digest]).sort((a,b)=>a[0].localeCompare(b[0]))),'publication_integrity');
-  const publisher=bundle.publisher;
+  need(same(index,proofIndex),'publication_integrity');
+  const {publisher,artifact}=bundle;
   need(same(publisher.scope,scope)&&publisher.definition_id===id&&publisher.definition_version===version&&publisher.source_draft_revision===row[2]&&same(publisher.authorization.actor,JSON.parse(row[5]))&&publisher.authorization.actor.principal_kind==='human','publication_integrity');
   need(result.definition_id===id&&result.definition_version===version&&result.source_draft_revision===row[2]&&same(result.scope,scope)&&result.program_digest===artifact.program_digest&&result.bindings_digest===artifact.bindings_digest&&result.published_by===publisher.authorization.actor.principal_id&&same(result.artifact_ref,{kind:'artifact',scope,object_id:artifact.artifact_id,revision:'1',digest:artifact.manifest_digest}),'publication_integrity');
-  return bundle;
+  return {...bundle,dependencies:compiled.dependencies,...(withEvaluator&&{compiled,bundle_digest:row[1]})};
  }
  function read(authentication,id,version,select){
   checked('LifecycleId',id);checked('LifecycleRevision',version);
   return writer(()=>{const proof=authorize(authentication,'getDraft',id,null),bundle=historical(id,version),value=select(bundle);need(same(proof,authorize(authentication,'getDraft',id,null)),'publication_authorization_changed');return freeze(structuredClone(value));});
  }
  return Object.freeze({
+  prepareTriggerProgram(id,version){
+   available();
+   const publication=Object.freeze(historical(id,version,true));
+   return Object.freeze({publication,assertOriginalInTransaction(){
+    need(isOpen()&&db.open&&db.inTransaction,'publication_store_closed');
+    const hash=db.prepare('SELECT bundle_digest FROM definition_publication WHERE definition_id=? AND definition_version=?').pluck().get(id,version);
+    need(hash===publication.bundle_digest,'publication_integrity');
+   }});
+  },
+  versionForRunInTransaction(id,version){
+   need(isOpen()&&db.open&&db.inTransaction,'publication_store_closed');
+   return historical(id,version);
+  },
   async publish(authentication,id,request){
    available();checked('LifecycleId',id);const body=checked('LifecyclePublish',request);need(pending<4,'publication_capacity');pending++;
+   let observation=null;
    try{
     const semantic={expected_draft_revision:body.expected_draft_revision,expected_content_digest:body.expected_content_digest,expected_selection_digest:body.expected_selection_digest};
     const requestDigest=hash({version:'automation-lifecycle/0.1.0-draft.1',operation_id:'publishDefinition',definition_id:id,request:semantic});
@@ -70,7 +98,7 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
      const proof=authorize(authentication,'publishDefinition',id,body.context.context_id);
      const identity=hash({scope,request_epoch:proof.request_epoch,actor:proof.actor,operation_id:'publishDefinition',idempotency_key:body.context.idempotency_key}),existing=prior(identity,requestDigest,authentication,id);
      if(existing){need(same(proof,authorize(authentication,'publishDefinition',id,body.context.context_id)),'publication_authorization_changed');return {existing};}
-     need(source&&typeof source.resolve==='function'&&typeof source.assertCurrentInTransaction==='function','publication_source_unavailable');
+     need(approvedBindings||source&&typeof source.resolve==='function'&&typeof source.assertCurrentInTransaction==='function','publication_source_unavailable');
      const current=draft(id);cas(current,body);
      need(db.prepare('SELECT count(*) FROM definition_version_reservation').pluck().get()<16384&&db.prepare('SELECT count(*) FROM definition_request').pluck().get()<16384,'publication_capacity');
      const last=db.prepare('SELECT definition_version FROM definition_version_reservation WHERE definition_id=? ORDER BY length(definition_version) DESC,definition_version DESC LIMIT 1').pluck().get(id);
@@ -79,13 +107,16 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
      need(same(proof,authorize(authentication,'publishDefinition',id,body.context.context_id)),'publication_authorization_changed');return {proof,identity,draft:current,version};
     });
     if(prepared.existing)return prepared.existing;
-    const snapshot=await source.resolve(freeze({scope,definition_id:id,draft:prepared.draft}));available();
+    const material=approvedBindings?.(prepared.draft);
+    const snapshot=material?material.snapshot:await source.resolve(freeze({scope,definition_id:id,draft:prepared.draft}));available();
     const derived=derivePublication(prepared.draft,prepared.version,snapshot);await validateStaticParameters(derived);available();
     const fixed=derived.input.snapshot,binding=freeze({scope,definition_id:id,source_draft_revision:prepared.draft.revision,content_digest:prepared.draft.content_digest,selection_digest:prepared.draft.selection_digest,snapshot:fixed});
+    if(material)observation=await material.observe();
+    const checkSource=()=>need((observation?observation.assertCurrentInTransaction():source.assertCurrentInTransaction(binding))===hash(fixed),'publication_source_changed');
     return writer(()=>{
      const proof=authorize(authentication,'publishDefinition',id,body.context.context_id);need(same(proof,prepared.proof),'publication_authorization_changed');
      const existing=prior(prepared.identity,requestDigest,authentication,id);if(existing){need(same(proof,authorize(authentication,'publishDefinition',id,body.context.context_id)),'publication_authorization_changed');return existing;}
-     cas(draft(id),body);need(source.assertCurrentInTransaction(binding)===hash(fixed),'publication_source_changed');
+     cas(draft(id),body);checkSource();
      need(db.prepare('SELECT count(*) FROM definition_request').pluck().get()<16384,'publication_capacity');
      const transaction=crypto.randomUUID();authority.commitRequestInTransaction?.({proof,transaction_id:transaction});
      const publisher={scope,definition_id:id,definition_version:prepared.version,source_draft_revision:prepared.draft.revision,authorization:proof};
@@ -95,16 +126,24 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
      const result=checked('LifecyclePublishedVersion',{scope,definition_id:id,definition_version:prepared.version,source_draft_revision:prepared.draft.revision,artifact_ref:{kind:'artifact',scope,object_id:artifact.artifact_id,revision:'1',digest:artifact.manifest_digest},program_digest:artifact.program_digest,bindings_digest:artifact.bindings_digest,published_by:proof.actor.principal_id});
      const bundle={draft:prepared.draft,snapshot:fixed,program:derived.compiled.compiled,graph:derived.compiled.graph,proofs,publisher,artifact,result},encoded=canonicalize(bundle);need(Buffer.byteLength(encoded)<=67108864,'publication_capacity');
      need(db.prepare('INSERT INTO definition_publication VALUES(?,?,?,?,?)').run(id,prepared.version,transaction,encoded,hash(bundle)).changes===1,'publication_integrity');
+     if(Number(service.schema_revision)>=12&&fixed.review.binding_approval_refs?.length){
+      const pins=new Map(fixed.review.binding_approval_refs.map(({kind,approval_ref})=>{
+       const fields=[kind,approval_ref.id,approval_ref.revision,approval_ref.digest];return [canonicalize(fields),fields];
+      }));
+      const insert=db.prepare('INSERT INTO definition_publication_binding_pin VALUES(?,?,?,?,?,?)');
+      for(const pin of pins.values())need(insert.run(id,prepared.version,...pin).changes===1,'publication_integrity');
+     }
      for(const item of proofs)need(db.prepare('INSERT INTO definition_publication_proof VALUES(?,?,?,?,?)').run(id,item.ref.id,item.ref.revision,prepared.version,item.ref.digest).changes===1,'publication_integrity');
      need(db.prepare('INSERT INTO definition_request VALUES(?,?,?,?,?,?,?,?)').run(transaction,prepared.identity,requestDigest,canonicalize(proof.actor),'publishDefinition',id,canonicalize(result),hash(result)).changes===1,'publication_integrity');
      const notification={kind:'publishDefinition',transaction_id:transaction,scope,definition_id:id,definition_version:prepared.version,source_draft_revision:prepared.draft.revision,artifact_ref:result.artifact_ref,actor:proof.actor};
      need(db.prepare('INSERT INTO definition_notification VALUES(?,?,?)').run(transaction,canonicalize(notification),hash(notification)).changes===1,'publication_integrity');
      need(same(proof,authorize(authentication,'publishDefinition',id,body.context.context_id)),'publication_authorization_changed');
-     need(source.assertCurrentInTransaction(binding)===hash(fixed),'publication_source_changed');return result;
+     checkSource();return result;
     });
-   }finally{pending--;}
+   }finally{try{observation?.release();}finally{pending--;}}
   },
   getArtifact(authentication,id,version){return read(authentication,id,version,bundle=>bundle.artifact);},
+  getVersion(authentication,id,version){return read(authentication,id,version,bundle=>bundle.result);},
   getProgram(authentication,id,version){return read(authentication,id,version,bundle=>bundle.program);},
   getProof(authentication,id,proofId,revision){
    checked('LifecycleId',id);checked('ContentRef',{id:proofId,revision,digest:'sha256:'+'0'.repeat(64)});

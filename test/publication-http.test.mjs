@@ -10,12 +10,12 @@ const {startDraftHttp}=await import(pathToFileURL(path.join(packageRoot,'dist/dr
 const {createClient,contractSelection:selection}=await import(pathToFileURL(path.join(packageRoot,'dist/sdk/index.mjs')));
 
 test('实际 HTTPS 发布、历史与查原使用文件库，CSRF 绑定本监听、context、令牌和 Origin',async t=>{
- const f=setup(t,{optional:true}),certificates=peerCertificates(),page='https://controller.invalid',otherPage='https://other.invalid',bootId=crypto.randomUUID();
+ const f=setup(t,{optional:true,revision:'14'}),certificates=peerCertificates(),page='https://controller.invalid',otherPage='https://other.invalid',bootId=crypto.randomUUID();
  let contextSeq=0,confirmDenied=false;const contexts=new Map(),authorization={
   createRequestContext(_handle,body){const value={context_id:'context-'+ ++contextSeq,service_id:f.identity.service_id,issuer_id:'issuer',issuer_epoch:'epoch',principal_id:'person',audience:f.identity.service_id,operations:body.operations,context_epoch:f.identity.request_epoch,issued_at:'2026-11-12T00:00:00.000Z',expires_at:'2026-11-12T00:00:30.000Z',ttl_ms:30000,max_unique_requests:8,selection};contexts.set(value.context_id,value);return value;},
   getRequestContext(_handle,id){return contexts.get(id);},confirmDraftResult(){if(confirmDenied)throw Object.assign(new Error('denied'),{code:'local_authorization_denied'});}
  };
- const config={cert:certificates.leaves[0].cert,key:certificates.leaves[0].key,bindingId:crypto.randomUUID(),service:f.identity,bootId,receiver:{async prepare(){return null;}},authorization,drafts:f.store.drafts,publications:f.store.publications,allowedOrigins:[page,otherPage]};
+ const config={cert:certificates.leaves[0].cert,key:certificates.leaves[0].key,bindingId:crypto.randomUUID(),service:f.identity,bootId,receiver:{async prepare(){return null;}},authorization,drafts:f.store.drafts,publications:f.store.publications,runs:f.store.runs,allowedOrigins:[page,otherPage]};
  const app=await startDraftHttp(config);t.after(()=>app.close());
  let token='v1.'+crypto.randomUUID()+'.'+'A'.repeat(43),origin=page,csrf=null,lastHeaders=[];
  const client=createClient('seamer',selection,packet=>new Promise((resolve,reject)=>{
@@ -35,6 +35,13 @@ test('实际 HTTPS 发布、历史与查原使用文件库，CSRF 绑定本监�
  // 已提交后的响应拒绝不能伪称回滚，随后仅查原。
  csrf=null;const recovered=(await client.call('lookupAutomationRequest',{body:{context_id:ctx.context_id,idempotency_key:'http-publish',operation_id:'publishDefinition'}})).body.result.value;
  assert.equal(recovered.definition_version,'1');const path={definition_id:f.draft.definition_id,definition_version:'1'};
+ const published=await client.call('getDefinitionVersion',{path});assert.equal(published.status,'200');assert.deepEqual(published.body,recovered);
+ assert.equal((await client.call('getDefinitionVersion',{path:{...path,definition_version:'2'}})).status,'404');
+ const activation=await client.call('getActivationSlot',{path:{definition_id:path.definition_id}});
+ assert.equal(activation.status,'200');
+ assert.deepEqual(activation.body,{scope:f.scope,definition_id:path.definition_id,revision:'0',active_run_id:null,definition_version:null});
+ assert.equal((await client.call('getActivationSlot',{path:{definition_id:crypto.randomUUID()}})).status,'404');
+ token='invalid';assert.equal((await client.call('getActivationSlot',{path:{definition_id:path.definition_id}})).status,'401');token=originalToken;
  const artifact=await client.call('getPublishedArtifact',{path});assert.equal(artifact.status,'200');assert.equal(artifact.body.manifest_digest,recovered.artifact_ref.digest);
  assert.equal((await client.call('getCompiledProgram',{path})).body.definition_version,'1');const proof=artifact.body.proof_refs[0];
  assert.equal((await client.call('getIndependenceProof',{path:{definition_id:f.draft.definition_id,proof_id:proof.id},query:{revision:proof.revision}})).body.verdict,'independent');
