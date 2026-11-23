@@ -15,6 +15,14 @@
     "reference-time-scheduler.mjs": "781aa95efbfe928881f0842327ae952bfc313bca8297ee265b1ce74b12552b5c"
   },
   "additional_manifests": {
+    "7aa92cee094ebffa6ed7e58bd1c12b731343291d51d2c568820e5a77dd1609b2": {
+      "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
+      "peer-pairing-transport.mjs": "ba89cf6795a19313f2c84f95a21e696077422e02506fa379d4d3b6b924c8aa4d",
+      "peer-run-preparation.mjs": "c1449f9efe50e9e6df86f4953c18f40c8588b55d65614ea28510d9ebd41de12d",
+      "peer-action-binding.mjs": "65bdd19654d1c230b0048e07f7f2131675574ae4e9f540efde342925c8f725fe",
+      "peer-automation-command.mjs": "233d35064ba13209337f1a243458bfc1afc6a169ea0071fe0448f7d17830ec8c",
+      "supervisor-control.mjs": "36d4eb70482fcecc2568b5228aea2d7040c47831d851f72acd6a81665d5eaa12"
+    },
     "a65af269837d48334fadf47abe5b9a559796e8ee32eaec31155fdbce21bd8d7a": {
       "peer-pairing-store.mjs": "c9aead6e129490ad9fbff9e312944c7a349c0b6eae9568f2e9c3414aa9a754f1",
       "peer-pairing-transport.mjs": "ba89cf6795a19313f2c84f95a21e696077422e02506fa379d4d3b6b924c8aa4d",
