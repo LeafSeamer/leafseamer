@@ -86,10 +86,11 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
  }catch{throw Object.assign(new Error('pairing_profile_invalid'),{code:'pairing_profile_invalid'});}
 }
 
-export function openInstalledPublicationPolicy(settings,{identity,clock}){
+export function openInstalledPublicationPolicy(settings,{identity,clock},{linux=false}={}){
  const {approval_file,approval_sha256}=settings;
+ const readFile=linux?readLinuxProtectedFile:readLocalFile;
  function readApproval(){
-  const bytes=readLocalFile(approval_file,16384);
+  const bytes=readFile(approval_file,16384);
   need('sha256:'+crypto.createHash('sha256').update(bytes).digest('hex')===approval_sha256,'publication_policy_digest');
   return bytes;
  }

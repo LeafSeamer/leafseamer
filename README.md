@@ -175,6 +175,8 @@ Seamer 的时钟包络可由 Controller 安装包中的 `dist/clock-evidence.mjs
 
 Suite 的 Compose 计划可使用 `contained-compose-linux --data-dir <绝对数据目录> --ingress-profile <绝对路径> --bootstrap-policy <规范 JSON>`。核心从 FD 3 完成闭锁准入并保存回执。可附加 `--clock-evidence-profile <绝对路径>` 采用受保护的 `/2` 配置，容器内回环的 `/health/ready` 可查询采集状态。启用 `--pairing-profile` 时，时钟取得资格后启动绑定到指定配对的业务 HTTPS，本机权限管理在独立容器回环监听。Compose 首次授权由同一运行代内的 Seamer 从宿主只读挂载目录采用。[Suite](https://github.com/LeafSeamer/leafseamer-suite)
 
+已配对的 Compose Seamer 可从 `publication_policy` 采用安装批准。该批准由 Suite 固定摘要并只读挂载。Seamer 按 Linux 受保护文件规则读取，核对原件、服务库、策略和有效期，再由现有发布事务检查人员授权与当前绑定批准。[Suite 部署说明](https://github.com/LeafSeamer/leafseamer-suite)
+
 可用 `--clock-evidence-profile <绝对路径>` 检查本次 Seamer 启动的签名授时证据。配置 `format` 为 `leafseamer.seamer-linux-clock-evidence-profile/1`，其余字段为 `service_id`、`database_instance_id`、`policy_digest`、`public_key_file` 和 `exchange_directory`。服务与库标识须匹配本次引导策略。公钥和交换目录使用绝对路径，由 root 或服务账户持有并防止其他账户写入。Seamer 使用自己的交换目录、策略和数据库身份。
 
 保存闭锁回执后，Seamer 发布 `challenge-<service_boot_id>.json`。签发方在同一原生时钟域用该挑战签发 `evidence-<service_boot_id>.json`，并让服务账户能够读取证据。回环 `GET /health/ready` 的 `authentication_clock_evidence` 报告 `missing`、`verified`、`expired` 或 `rejected`。`verified` 表示本次签名、作用范围和原期限通过核验，服务仍处于 503 保护态。
