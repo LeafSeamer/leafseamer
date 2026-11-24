@@ -173,6 +173,10 @@ Seamer 的时钟包络可由 Controller 安装包中的 `dist/clock-evidence.mjs
 
 可信 Suite 装配通过 `contained-core-linux --data-dir <绝对数据目录> --bootstrap-policy <规范 JSON>` 启动 Seamer，回环地址和端口可用 `--host`、`--port` 指定。进程通过定向继承的 FD 3 使用既有 SDK 引导，核对 Node 和 Seamer 构建清单的摘要、数据库、cgroup 及本机单调域。最低 Schema 20 的业务库要先保存闭锁回执，随后才开启保护态回环诊断。监督通道断开时关闭服务。授权操作、服务配对与生产授时仍需完整部署装配。
 
+可用 `--clock-evidence-profile <绝对路径>` 检查本次 Seamer 启动的签名授时证据。配置 `format` 为 `leafseamer.seamer-linux-clock-evidence-profile/1`，其余字段为 `service_id`、`database_instance_id`、`policy_digest`、`public_key_file` 和 `exchange_directory`。服务与库标识须匹配本次引导策略。公钥和交换目录使用绝对路径，由 root 或服务账户持有并防止其他账户写入。Seamer 使用自己的交换目录、策略和数据库身份。
+
+保存闭锁回执后，Seamer 发布 `challenge-<service_boot_id>.json`。签发方在同一原生时钟域用该挑战签发 `evidence-<service_boot_id>.json`，并让服务账户能够读取证据。回环 `GET /health/ready` 的 `authentication_clock_evidence` 报告 `missing`、`verified`、`expired` 或 `rejected`。`verified` 表示本次签名、作用范围和原期限通过核验，服务仍处于 503 保护态。
+
 启用 `public_api.local_permissions` 后，可在本机以 `POST /auth/local-permissions/v1` 管理本地权限。使用发给该 Seamer 的人员 Bearer 令牌和 `Content-Type: application/json`。此路由接受本机直连 HTTPS，请求不携带 Cookie、Origin 或代理头。正文使用规范 JSON `{operation, request}`。读当前授权时用 `inspect` 和 `request: {principal_id}`。写授权时用 `replace`，提供 `request_id`、`principal_id`、`principal_kind`、`expected_revision`、`permissions`、`definition_scope`、`not_before_ns` 和 `expires_ns`。写入要求已有本地管理权限、当前签发方权限和近期认证。
 
 首次配对只登记 `auth.read` 和 `auth.manage`。创建草稿前，由 Controller 为该人员配置定向权限上限，再由 Seamer 管理员显式批准 `request.create` 和 `definition.edit` 等业务权限。读取草稿需要 `definition.read`。

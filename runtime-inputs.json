@@ -13,6 +13,16 @@
       "source_commit": "31cc3627ce5d4787e3a012de51febe2f8bd7b8cd",
       "sha256": "da191fcdfa407837f6a6d6f9a623e0005668a4902dce850b785ad5d70c1d6070"
     },
+    "src/runtime/clock-evidence-envelope.mjs": {
+      "source": "src/clock-evidence-envelope.mjs",
+      "source_commit": "f4f64effc5d1444bbea0019af7a528429c83eaf2",
+      "sha256": "f4379ab870a6e7a781040a7216e72e9c183404d7293c0633805117b2ff8d374a"
+    },
+    "src/runtime/linux-clock-evidence.mjs": {
+      "source": "src/linux-clock-evidence.mjs",
+      "source_commit": "f4f64effc5d1444bbea0019af7a528429c83eaf2",
+      "sha256": "41c2308a1146495635140b9d37cd1f5491f13f110a0c99c5c0dc5734207af40d"
+    },
     "src/runtime/auth-clock.mjs": {
       "source": "src/auth-clock.mjs",
       "sha256": "fc68a5db1710c19c2fd9ec01c67e3858c6e4ea83a8bd5cd07ef09b98ef823242"

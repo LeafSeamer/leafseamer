@@ -6,9 +6,9 @@ import {setTimeout as delay} from 'node:timers/promises';
 import {canonical,context,digest,fields,same} from './runtime/auth-clock-value.mjs';
 import {clockInteger} from './runtime/native-clock.mjs';
 import {pairingUuid} from './runtime/peer-pairing-value.mjs';
+import {authenticationClockChallenge,verifyClockEvidence} from './runtime/clock-evidence-envelope.mjs';
 import {validateAutomationModel} from './sdk/automation-program.mjs';
 
-const evidenceFormat='leafseamer.authentication-clock-evidence/1';
 const publicationFormat='leafseamer.publication-policy-approval/1';
 const eventPublicationFormat='leafseamer.publication-policy-approval/2';
 const hash=value=>typeof value==='string'&&/^sha256:[a-f0-9]{64}$/.test(value);
@@ -144,19 +144,14 @@ export async function openPairingClock(profile,{scope,identity,source,supervised
  function read(allowPreviousBoot=false){
   let bytes;
   try{bytes=readLocalFile(settings.file,65536);}catch(error){if(allowPreviousBoot&&error.code==='ENOENT')return null;throw error;}
-  const packet=json(bytes);fields(packet,['format','evidence','signature']);
-  const {format,evidence,signature}=packet;
-  need(format===evidenceFormat&&canonical(packet)===bytes.toString('utf8')&&typeof signature==='string'&&/^[A-Za-z0-9_-]{86}$/.test(signature),'pairing_clock_encoding');
-  const signed=Buffer.from(signature,'base64url');
-  need(signed.length===64&&signed.toString('base64url')===signature&&crypto.verify(null,Buffer.from(format+'\0'+canonical(evidence)),settings.key,signed),'pairing_clock_signature');
+  const evidence=verifyClockEvidence(bytes,settings.key);
   need(evidence.policy?.digest===settings.policyDigest&&evidence.runtime?.service_id===scope.service_id,'pairing_clock_policy');
   if(allowPreviousBoot&&evidence.runtime.service_boot_id!==scope.service_boot_id)return null;
   if(supervisedDomain)need(evidence.runtime.clock_domain_id===supervisedDomain.clock_domain_id&&
    evidence.runtime.descriptor_digest===supervisedDomain.descriptor_digest,'pairing_clock_supervised_domain');
   return context(evidence,scope,source.artifactDigest,source.tick());
  }
- emit({event:'authentication_clock_challenge',...scope,database_instance_id:identity.database_instance_id,
-  native_binary_digest:source.artifactDigest,continuity:capture.continuity,tick_ns:String(source.tick()),...(supervisedDomain??{})});
+ emit(authenticationClockChallenge(scope,identity.database_instance_id,source,capture,supervisedDomain));
  const deadline=performance.now()+10000;
  for(;;){
   signal.throwIfAborted();if(read(true))return {read:()=>read()};

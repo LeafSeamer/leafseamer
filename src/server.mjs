@@ -2,6 +2,7 @@ import http from 'node:http';
 import {openStorage} from './storage.mjs';
 import {openNativeClock} from './runtime/native-clock.mjs';
 import {startAuthenticationClock} from './runtime/auth-clock.mjs';
+import {inspectLinuxClockEvidence} from './runtime/linux-clock-evidence.mjs';
 import {startPeerPairingTransport} from './runtime/peer-pairing-transport.mjs';
 import {startOutboxDelivery} from './runtime/session-denial-delivery.mjs';
 import {startExecutionNotificationDelivery} from './automation-execution-notification.mjs';
@@ -19,12 +20,13 @@ import {fields,same} from './runtime/auth-clock-value.mjs';
 import {contractSelection} from './sdk/index.mjs';
 
 export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticationProvider=null,referenceTimeProvider=null,
- supervisedReference=null,linuxBootstrap=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
+ supervisedReference=null,linuxBootstrap=null,linuxClockEvidenceProfile=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
  armAdmissionPolicy=null,executionNotificationSink=null,protectedIngress=null}={}){
  if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535)throw new Error('listen_options');
  if(authenticationProvider!==null&&typeof authenticationProvider!=='function')throw new Error('authentication_provider');
  if(referenceTimeProvider!==null&&(typeof referenceTimeProvider!=='function'||pairing===null))throw new Error('receiver_reference_provider');
  if(supervisedReference!==null&&(authenticationProvider===null||pairing===null))throw new Error('reference_supervisor_options');
+ if(linuxClockEvidenceProfile!==null&&linuxBootstrap===null)throw new Error('linux_clock_evidence_binding');
  if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,
   publicationSource,publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink,protectedIngress].some(value=>value!==null))
   throw new Error('bootstrap_linux_options');
@@ -45,7 +47,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   pairingUuid(notificationSink.consumerId);
   if(typeof notificationSink.deliver!=='function')throw new Error('execution_notification_sink');
  }
- let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null;
+ let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidenceStatus=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
  const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy,expectedIdentity:protectedIngress?.identity??null});
@@ -61,6 +63,9 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    if(Number(identity.schema_revision)<20)throw new Error('bootstrap_linux_schema');
    const accepted=await linuxBootstrap.accept({identity,source});
    storage.adoptLinuxCoreRuntime(accepted);
+   if(linuxClockEvidenceProfile!==null){
+    clockEvidenceStatus=inspectLinuxClockEvidence(linuxClockEvidenceProfile,storage.authenticationClock.scope,accepted,source);
+   }
    accepted.assertCurrent();
   }
   if(notificationSink)executionNotifications=storage.bindExecutionNotifications(notificationSink.consumerId);
@@ -96,6 +101,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{Allow:'GET, HEAD'});res.end();return;}
   const health=req.url==='/health/live'?{status:200,body:{status:'alive'}}:req.url==='/health/ready'?{status:503,body:{ready:false,reason:authentication.status().qualified?'business_incomplete':'authentication_clock_unqualified'}}:null;
   if(!health){res.writeHead(req.url==='/.well-known/leafseamer-contracts'?503:404);res.end();return;}
+  if(health.status===503&&clockEvidenceStatus)health.body.authentication_clock_evidence=clockEvidenceStatus();
   const body=Buffer.from(JSON.stringify(health.body));res.writeHead(health.status,{'Content-Type':'application/json','Content-Length':body.length});res.end(req.method==='HEAD'?undefined:body);
  });
  server.maxConnections=32;server.maxRequestsPerSocket=100;server.on('clientError',(_error,socket)=>socket.destroy());
