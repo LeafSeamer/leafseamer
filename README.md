@@ -181,6 +181,10 @@ Seamer 的时钟包络可由 Controller 安装包中的 `dist/clock-evidence.mjs
 
 及时续签时保持 `policy` 和 `runtime` 原件，按现有签发流程生成新的 `health` 原件。它须在旧原件截止前到达，且由一次新采集事务采用。替换证据前先设置服务账户的读取权限，再在同一文件系统内原子替换目标文件。旧采集保留原截止，证据失效或撤下后当前运行域持久锁闭。
 
+受监督 Linux 启动可同时提供 `--pairing-profile <绝对路径>` 和 `/2` 的 `--clock-evidence-profile`。Linux 配对格式为 `leafseamer.seamer-pairing-profile/2`，沿用 `scope`、`local`、`controller`、`first_pairing_authorization_id` 及可选公开 API 和发布策略字段。`scope` 与引导策略必须绑定同一服务和数据库；时钟由单独的证据配置提供。TLS 文件和配置使用受保护的绝对路径。
+
+先用 `import-first-pairing` 将 Controller 人员签发的一次性授权导入目标 Seamer。受监督启动取得首次持久认证采集后才开启配对和公开 TLS。配置中的授权 ID 用于首次完成和重投查原；监督通道关闭时停止配对和公开监听。
+
 启用 `public_api.local_permissions` 后，可在本机以 `POST /auth/local-permissions/v1` 管理本地权限。使用发给该 Seamer 的人员 Bearer 令牌和 `Content-Type: application/json`。此路由接受本机直连 HTTPS，请求不携带 Cookie、Origin 或代理头。正文使用规范 JSON `{operation, request}`。读当前授权时用 `inspect` 和 `request: {principal_id}`。写授权时用 `replace`，提供 `request_id`、`principal_id`、`principal_kind`、`expected_revision`、`permissions`、`definition_scope`、`not_before_ns` 和 `expires_ns`。写入要求已有本地管理权限、当前签发方权限和近期认证。
 
 首次配对只登记 `auth.read` 和 `auth.manage`。创建草稿前，由 Controller 为该人员配置定向权限上限，再由 Seamer 管理员显式批准 `request.create` 和 `definition.edit` 等业务权限。读取草稿需要 `definition.read`。

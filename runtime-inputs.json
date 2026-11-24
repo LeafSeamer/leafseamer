@@ -10,8 +10,8 @@
     },
     "src/linux-core-bootstrap.mjs": {
       "source": "src/linux-core-bootstrap.mjs",
-      "source_commit": "31cc3627ce5d4787e3a012de51febe2f8bd7b8cd",
-      "sha256": "da191fcdfa407837f6a6d6f9a623e0005668a4902dce850b785ad5d70c1d6070"
+      "source_commit": "df3bd1733639d6640326ff99ab33b0afda2b1e89",
+      "sha256": "d8e5c81837bb665580266a917a51171c0b99c7c2fac6375def392c158f86264a"
     },
     "src/runtime/clock-evidence-envelope.mjs": {
       "source": "src/clock-evidence-envelope.mjs",
@@ -20,8 +20,8 @@
     },
     "src/runtime/linux-clock-evidence.mjs": {
       "source": "src/linux-clock-evidence.mjs",
-      "source_commit": "15cf95f4d38ffbbc382bb13a1b55468095ed355e",
-      "sha256": "bcf8ec97ef18acb4e52168f04ecc25d37a542bf765a72c2cf8e2156a4f3e40e5"
+      "source_commit": "df3bd1733639d6640326ff99ab33b0afda2b1e89",
+      "sha256": "ea611c76e7e6eda17fbc41f1a47ed8860645025c9b3e459b960d21a416796d2a"
     },
     "src/runtime/auth-clock.mjs": {
       "source": "src/auth-clock.mjs",

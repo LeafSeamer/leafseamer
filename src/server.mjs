@@ -2,7 +2,7 @@ import http from 'node:http';
 import {openStorage} from './storage.mjs';
 import {openNativeClock} from './runtime/native-clock.mjs';
 import {startAuthenticationClock} from './runtime/auth-clock.mjs';
-import {inspectLinuxClockEvidence} from './runtime/linux-clock-evidence.mjs';
+import {inspectLinuxClockEvidence,waitForLinuxAuthentication} from './runtime/linux-clock-evidence.mjs';
 import {startPeerPairingTransport} from './runtime/peer-pairing-transport.mjs';
 import {startOutboxDelivery} from './runtime/session-denial-delivery.mjs';
 import {startExecutionNotificationDelivery} from './automation-execution-notification.mjs';
@@ -27,8 +27,9 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(referenceTimeProvider!==null&&(typeof referenceTimeProvider!=='function'||pairing===null))throw new Error('receiver_reference_provider');
  if(supervisedReference!==null&&(authenticationProvider===null||pairing===null))throw new Error('reference_supervisor_options');
  if(linuxClockEvidenceProfile!==null&&linuxBootstrap===null)throw new Error('linux_clock_evidence_binding');
- if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,
-  publicationSource,publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink,protectedIngress].some(value=>value!==null))
+ const linuxPairing=linuxBootstrap!==null&&linuxClockEvidenceProfile?.authentication===true&&pairing!==null;
+ if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,
+  ...(!linuxPairing?[pairing,publicApi,publicationPolicyFactory]:[]),publicationSource,publicationPolicy,armAdmissionPolicy,executionNotificationSink,protectedIngress].some(value=>value!==null))
   throw new Error('bootstrap_linux_options');
  if(referenceSamplingAuthority!==null&&(typeof referenceSamplingAuthority!=='function'||supervisedReference===null||referenceTimeProvider!==null))
   throw new Error('reference_sampling_authority');
@@ -60,10 +61,11 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  try{
   const linuxAuthentication=linuxClockEvidenceProfile?.authentication===true;
   const identity=storage.identity;
-  let source=openNativeClock();
+  let source=openNativeClock(),linuxRuntime=null;
   if(linuxBootstrap){
    if(Number(identity.schema_revision)<20)throw new Error('bootstrap_linux_schema');
    const accepted=await linuxBootstrap.accept({identity,source});
+   linuxRuntime=accepted;
    storage.adoptLinuxCoreRuntime(accepted);
    if(linuxClockEvidenceProfile!==null){
     if(linuxAuthentication)source=openNativeClock({linuxWithoutSystemSleep:true});
@@ -79,6 +81,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    await authenticationProvider?.({scope:storage.authenticationClock.scope,identity,source,...(supervisedDomain&&{supervisedDomain})});
   authentication=startAuthenticationClock(source,storage.authenticationClock,provider??null,
    {waitForInitialEvidence:linuxAuthentication,renewableHealth:linuxAuthentication});
+  if(linuxPairing)await waitForLinuxAuthentication(authentication,linuxRuntime.signal);
   const openSampling=referenceSamplingAuthority===null?null:async input=>{
    const authority=await referenceSamplingAuthority({identity,serviceBootId:storage.serviceBootId,source,supervisedDomain});
    return storage.openReferenceSampling({...input,authority});
@@ -110,6 +113,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(authStatus&&clockEvidence){
    health.body.authentication_clock_evidence=clockEvidence.status();
    if(linuxClockEvidenceProfile.authentication)health.body.authentication_clock=authStatus.state;
+   if(linuxPairing&&authStatus.state==='faulted')health.body.authentication_clock_reason=authStatus.reason;
   }
   const body=Buffer.from(JSON.stringify(health.body));res.writeHead(health.status,{'Content-Type':'application/json','Content-Length':body.length});res.end(req.method==='HEAD'?undefined:body);
  });

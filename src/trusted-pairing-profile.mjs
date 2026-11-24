@@ -7,6 +7,7 @@ import {canonical,context,digest,fields,same} from './runtime/auth-clock-value.m
 import {clockInteger} from './runtime/native-clock.mjs';
 import {pairingUuid} from './runtime/peer-pairing-value.mjs';
 import {authenticationClockChallenge,verifyClockEvidence} from './runtime/clock-evidence-envelope.mjs';
+import {readLinuxProtectedFile} from './runtime/linux-clock-evidence.mjs';
 import {validateAutomationModel} from './sdk/automation-program.mjs';
 
 const publicationFormat='leafseamer.publication-policy-approval/1';
@@ -31,19 +32,20 @@ export function readLocalFile(file,limit,{noFollow=false}={}){
 function json(buffer){return JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(buffer));}
 function httpsOrigin(value){const url=new URL(value);return typeof value==='string'&&url.protocol==='https:'&&url.origin===value;}
 
-export function readTrustedPairingProfile(file){
+export function readTrustedPairingProfile(file,{linux=false}={}){
  try{
-  const value=json(readLocalFile(file,65536));
-  fields(value,['format','scope','local','controller','clock','first_pairing_authorization_id',
+  const readFile=linux?readLinuxProtectedFile:readLocalFile;
+  const value=json(readFile(file,65536));
+  fields(value,['format','scope','local','controller',...(linux?[]:['clock']),'first_pairing_authorization_id',
    ...(Object.hasOwn(value,'public_api')?['public_api']:[]),...(Object.hasOwn(value,'publication_policy')?['publication_policy']:[])]);
-  need(value.format==='leafseamer.seamer-pairing-profile/1','pairing_profile_format');
+  need(value.format==='leafseamer.seamer-pairing-profile/'+(linux?'2':'1'),'pairing_profile_format');
   const {scope,local,controller,clock,first_pairing_authorization_id:authorizationId}=value;
   fields(scope,['service_id','database_instance_id']);Object.values(scope).forEach(pairingUuid);
   fields(local,['credential_id','host','port','certificate_file','private_key_file','ca_files',
    ...(Object.hasOwn(local,'network')?['network']:[]),...(Object.hasOwn(local,'server_name')?['server_name']:[])]);
   fields(controller,['identity','origin','server_name','certificate_file','trust_bundle_digest']);
   fields(controller.identity,['service_id','database_instance_id','service_kind','issuer_id','issuer_epoch','credential_id']);
-  fields(clock,['policy_digest','evidence_file','public_key_file']);
+  if(!linux)fields(clock,['policy_digest','evidence_file','public_key_file']);
   pairingUuid(local.credential_id);if(authorizationId!==null)pairingUuid(authorizationId);
   const {service_kind,...ids}=controller.identity;Object.values(ids).forEach(pairingUuid);
   const network=local.network===true;
@@ -52,7 +54,7 @@ export function readTrustedPairingProfile(file){
    (!Object.hasOwn(local,'server_name')||typeof local.server_name==='string'&&local.server_name.length>0&&local.server_name.length<=253)&&
    Number.isInteger(local.port)&&local.port>0&&local.port<=65535&&
    Array.isArray(local.ca_files)&&local.ca_files.length>0&&local.ca_files.length<=8&&
-   hash(controller.trust_bundle_digest)&&hash(clock.policy_digest)&&typeof clock.evidence_file==='string'&&path.isAbsolute(clock.evidence_file),'pairing_profile_scope');
+   hash(controller.trust_bundle_digest)&&(linux||hash(clock.policy_digest)&&typeof clock.evidence_file==='string'&&path.isAbsolute(clock.evidence_file)),'pairing_profile_scope');
   need(httpsOrigin(controller.origin)&&typeof controller.server_name==='string'&&controller.server_name.length>0&&controller.server_name.length<=253,'pairing_profile_endpoint');
   let publicApi=null;
   if(Object.hasOwn(value,'public_api')){
@@ -65,7 +67,7 @@ export function readTrustedPairingProfile(file){
     new Set(api.allowed_origins).size===api.allowed_origins.length&&api.allowed_origins.every(httpsOrigin)&&
     typeof api.local_permissions==='boolean'&&(!Object.hasOwn(api,'local_event_bindings')||typeof api.local_event_bindings==='boolean'),'pairing_profile_public_api');
    publicApi={host:api.host,port:api.port,binding_id:api.binding_id,allowedOrigins:api.allowed_origins,localPermissions:api.local_permissions,
-    localEventBindings:api.local_event_bindings===true,cert:readLocalFile(api.certificate_file,65536),key:readLocalFile(api.private_key_file,65536)};
+    localEventBindings:api.local_event_bindings===true,cert:readFile(api.certificate_file,65536),key:readFile(api.private_key_file,65536)};
   }
   const publicationPolicy=value.publication_policy??null;
   if(Object.hasOwn(value,'publication_policy')){
@@ -74,13 +76,13 @@ export function readTrustedPairingProfile(file){
     hash(publicationPolicy.approval_sha256),'pairing_profile_publication_policy');
   }
   const {service_id,issuer_id,issuer_epoch}=ids;
-  const key=crypto.createPublicKey(readLocalFile(clock.public_key_file,16384));
-  need(key.asymmetricKeyType==='ed25519','pairing_profile_signer');
-  return {scope,authorizationId,publicApi,publicationPolicy,clock:{file:clock.evidence_file,policyDigest:clock.policy_digest,key},
+  const key=linux?null:crypto.createPublicKey(readLocalFile(clock.public_key_file,16384));
+  need(linux||key.asymmetricKeyType==='ed25519','pairing_profile_signer');
+  return {scope,authorizationId,publicApi,publicationPolicy,clock:linux?null:{file:clock.evidence_file,policyDigest:clock.policy_digest,key},
    pairing:{host:local.host,port:local.port,network,serverName:local.server_name??local.host,credential_id:local.credential_id,issuer:{service_id,issuer_id,issuer_epoch},
-    cert:readLocalFile(local.certificate_file,65536),key:readLocalFile(local.private_key_file,65536),ca:local.ca_files.map(file=>readLocalFile(file,65536))},
+    cert:readFile(local.certificate_file,65536),key:readFile(local.private_key_file,65536),ca:local.ca_files.map(file=>readFile(file,65536))},
    peer:{identity:controller.identity,origin:controller.origin,server_name:controller.server_name,trust_bundle_digest:controller.trust_bundle_digest,
-    cert:readLocalFile(controller.certificate_file,65536).toString('utf8')}};
+    cert:readFile(controller.certificate_file,65536).toString('utf8')}};
  }catch{throw Object.assign(new Error('pairing_profile_invalid'),{code:'pairing_profile_invalid'});}
 }
 
