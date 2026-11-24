@@ -7,6 +7,7 @@ import {startPeerPairingTransport} from './runtime/peer-pairing-transport.mjs';
 import {startOutboxDelivery} from './runtime/session-denial-delivery.mjs';
 import {startExecutionNotificationDelivery} from './automation-execution-notification.mjs';
 import {createPeerSubscriptionClient} from './peer-subscription-client.mjs';
+import {manageSourceSubscriptions} from './managed-source-subscription.mjs';
 import {createPeerSnapshotReceiver} from './peer-snapshot-receiver.mjs';
 import {createPeerSnapshotConfirmation} from './peer-snapshot-confirmation.mjs';
 import {pairingUuid} from './runtime/peer-pairing-value.mjs';
@@ -127,6 +128,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  const closeHttp=()=>new Promise((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeAllConnections();});
  let peerTransport=null,peerApi=null,identityReceiver=null,authorization=null,publicTransport=null,management=null,bindingReceiver=null,bindingApprovals=null,eventReceiver=null,subscriptions=null,snapshotReceiver=null,snapshotIngest=null,reconcile=null,snapshotConfirmation=null,runEndorsementReader=null,runProtectionDelivery=null;
  let ingressTransport=null;
+ let sourceSubscriptions=null;
  let armPreparationDelivery=null;
  let bindingRevocationScanFailures=0;
  const delegate=(method,args)=>{if(!management||typeof management[method]!=='function')throw new Error('peer_pairing_management_unavailable');return management[method](...args);};
@@ -162,6 +164,10 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    return attach(bindingId,view,{replace_existing:options.replace_existing,connection_attempt_id:options.connection_attempt_id});
   }});
   authorization=storage.bindLocalAuthorization({clock:authentication,receiver:identityReceiver,issuer:pairing.issuer});
+  if(publicApi?.localSourceSubscriptions===true){
+   if(!reconcile)throw new Error('pairing_profile_source_subscriptions_unavailable');
+   sourceSubscriptions=manageSourceSubscriptions({bindingId:publicApi.binding_id,client,receiver:snapshotReceiver,ingest:snapshotIngest,confirmation:snapshotConfirmation});
+  }
   if(storage.runs?.submitArmPreparation)storage.bindArmPreparationTransport({submit:peerTransport.submitRunPreparation,lookup:peerTransport.lookupRunPreparation,
    eligibility:peerTransport.prepareRunPreparationEligibility});
   if(storage.runs?.reconcileAutomationSubmission&&peerTransport.submitAutomationCommand){
@@ -177,7 +183,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   }
   if(Number(storage.identity.schema_revision)>=3){bindingReceiver=createPeerBindingReceiver({service:storage.identity,pairings:peerApi,clock:authentication,transport:peerTransport});bindingApprovals=storage.bindBindingApprovals({receiver:bindingReceiver,eventReceiver});}
   if(publicApi!==null)publicTransport=await startDraftHttp({host:publicApi.host??'127.0.0.1',port:publicApi.port??0,cert:publicApi.cert,key:publicApi.key,bindingId:publicApi.binding_id,
-   allowedOrigins:publicApi.allowedOrigins??[],localPermissions:publicApi.localPermissions===true,localEventBindings:publicApi.localEventBindings===true,onFailure:publicApi.onFailure??null,
+   allowedOrigins:publicApi.allowedOrigins??[],localPermissions:publicApi.localPermissions===true,localEventBindings:publicApi.localEventBindings===true,sourceSubscriptions,onFailure:publicApi.onFailure??null,
    service:storage.identity,bootId:storage.serviceBootId,receiver:identityReceiver,authorization,bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs});
   if(storage.runs?.scanArmPreparation)armPreparationDelivery=startOutboxDelivery({scan:storage.runs.scanArmPreparation,
    async deliver(item){return (await storage.runs.deliverArmPreparation(item)).state;},pageSize:4});
@@ -199,7 +205,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
     bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs}:{protectedIngress:true})});
  }
  if(executionNotifications)executionNotificationDelivery=startExecutionNotificationDelivery(executionNotifications,notificationSink.deliver);
- }catch(error){identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close()]);await closeFailedStartup(error);throw error;}
+ }catch(error){sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close()]);await closeFailedStartup(error);throw error;}
  sampling?.start();
  const {stageFirstPairing,readFirstPairingCompletion,activateFirstPairing,...normalPairing}=peerApi??{};
  const assertFirstPairingManagement=()=>{if(management!==authorization.pairingManagement)throw new Error('peer_pairing_first_enrollment_management');};
@@ -237,7 +243,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
     return await peerTransport.deliverRunApprovalProtection(binding_id,notice);
    }:null,runApprovalProtectionStatus:()=>runProtectionDelivery?{...runProtectionDelivery.status(),binding_revocation_scan_failed:bindingRevocationScanFailures}:null,
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
-  close(){return stopping??=(async()=>{identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
+  close(){return stopping??=(async()=>{sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
    const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close()]);
    try{linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}

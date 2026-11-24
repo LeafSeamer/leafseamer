@@ -304,6 +304,10 @@ Schema 4 增加显式快照持久采用。停机后执行 `leafseamer migrate-st
 
 `query(bindingId,connection,applyId)` 通过配对 GET 查询原确认，核对当前连接、owner、快照引用和基线标记摘要，返回 pending 或 confirmed。确认响应丢失后可用原采用回执查询。
 
+在配对配置的 `public_api` 中设定 `local_source_subscriptions: true`，可在 Schema 5 或更高版本通过回环 TLS 1.3 的 `POST /auth/local-source-subscriptions/v1` 启动和复查订阅。请求使用发给该 Seamer 的人员 Bearer 令牌，签发方与 Seamer 本地均须授予 `auth.manage`，并核对近期认证。正文为规范 JSON，`operation` 固定为 `connect`，`request` 包含 `request_id`、`consumer_id` 和 Controller 登记范围后返回的完整 `scope`。Controller 仍须为此消费者槽分别批准组织身份和接收政策。管理代理不转发该入口。
+
+以相同请求重投可推进或查询订阅。成功响应 `{result}` 包含 `state`、`subscription_id`、`apply_id` 和 `transport_ready`。 `building` 表示 Controller 正在构建快照，`pending` 表示已有本机采用回执并等待通道就绪，`confirmed` 表示已核对发布端的确认点。只有 `transport_ready: true` 表示当前连接已通过实时传输检查点。断连后使用同一请求和原持久采用回执恢复。订阅撤销、到期或需要重新同步时须由操作员重新核对范围和资格。传输状态本身不提供事件年龄证据或布防资格。
+
 断线后调用 `app.pairing.snapshotConfirmation.resume(bindingId,applyId)`。Seamer 从当前持久投影读取采用回执，重新查询 Controller 已确认的水位，核对来源修订及确认摘要后建立新连接。若要显式替换仍被登记为活动的连接，第三个参数传入 `{replace_existing:true}`。成功返回新连接句柄，订阅处于 `catching_up`。投影已替换、配对失效或确认点不匹配会拒绝恢复。
 
 停机后用 `leafseamer migrate-storage --data-dir <绝对路径> --to-revision 5` 启用持久追赶接收。Schema 5 核验当前配对连接、快照采用回执、来源范围和正文摘要，在 SQLite 提交该帧及接收端首次单调时钟观察后发送 durable_ingest ACK。首次观察引用本机已保存的时钟采集原件，记录接收时使用的启动标识、时钟域和单调时刻。精确重放仍核验并保留原首次观察及原采集引用。事件年龄依据为 `unproven`。当固定区间末尾的 `server.sync.ready` 已持久接收且发布方水位确认后，`snapshotConfirmation.query` 返回 `transport_ready: true`。同一连接代际持久接收检查点后可接受实时帧。新代先按 reconcile 接收历史，旧数据的首次观察保持原样。年龄资格与自动化恢复仍待实现。

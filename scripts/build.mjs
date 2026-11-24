@@ -16,7 +16,7 @@ files.push(['peer-event-receiver.mjs',await fs.readFile(path.join(root,'src/peer
 files.push(['peer-subscription-client.mjs',await fs.readFile(path.join(root,'src/peer-subscription-client.mjs'))]);
 files.push(['snapshot-lease.mjs',await fs.readFile(path.join(root,'src/snapshot-lease.mjs'))]);
 for(const name of ['snapshot-content.mjs','peer-snapshot-receiver.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
-for(const name of ['snapshot-ingest-store.mjs','storage-v4.sql','storage-v5.sql','reconcile-inbox.mjs','peer-snapshot-confirmation.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['snapshot-ingest-store.mjs','storage-v4.sql','storage-v5.sql','reconcile-inbox.mjs','peer-snapshot-confirmation.mjs','managed-source-subscription.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['automation-run-store.mjs',await fs.readFile(path.join(root,'src','automation-run-store.mjs'))]);
 files.push(['peer-service-approval.mjs',await fs.readFile(path.join(root,'src','peer-service-approval.mjs'))]);
 files.push(['peer-run-approval-endorsement.mjs',await fs.readFile(path.join(root,'src','peer-run-approval-endorsement.mjs'))]);

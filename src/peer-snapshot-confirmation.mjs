@@ -64,13 +64,13 @@ export function createPeerSnapshotConfirmation({ingest,receiver,client,reconcile
  }
  return Object.freeze({query,prepareSourceTransport,...(reconcile?.prepareAge&&{prepareEventAge(input){
   return reconcile.prepareAge(input,{readSourceInTransaction:ingest.sourceStateInTransaction,prepareSourceTransport});
- }}),async resume(bindingId,applyId,options={}){
-  const receipt=ingest.confirmationReceipt(applyId),current=()=>need(same(ingest.confirmationReceipt(applyId),receipt),'changed');
+ }}),async resume(bindingId,applyId,{assertCurrent=()=>{},...options}={}){
+  const receipt=ingest.confirmationReceipt(applyId),current=()=>{assertCurrent();need(same(ingest.confirmationReceipt(applyId),receipt),'changed');};
   const {view}=await client.get(bindingId,receipt.delivery_binding.subscription_id);current();const resume=confirmed(view,receipt);
   const connection=await client.attach(bindingId,view,{...options,resume,beforeSend:current,onReconcile:onReconcile(bindingId,receipt)});
   try{current();const attached=bound(bindingId,connection,receipt);if(reconcile&&clock)retain(bindingId,connection,receipt,attached);return connection;}catch(error){connection.close();throw error;}
- },async send(bindingId,connection,handle){const receipt=ingest.lookup(handle),attached=bound(bindingId,connection,receipt);
-  await client.snapshotApplied(bindingId,connection,receipt.snapshot_ref,()=>{const current=receiver.current(handle);need(same(current.subscription.binding,attached.attached.binding)&&same(current.subscription.owner,receipt.owner)&&same(current.subscription.snapshot_ref,receipt.snapshot_ref)&&same(ingest.confirmationReceipt(receipt.apply_id),receipt),'changed');},onReconcile(bindingId,receipt));
+ },async send(bindingId,connection,handle,assertCurrent=()=>{}){const receipt=ingest.lookup(handle),attached=bound(bindingId,connection,receipt);
+  await client.snapshotApplied(bindingId,connection,receipt.snapshot_ref,()=>{assertCurrent();const current=receiver.current(handle);need(same(current.subscription.binding,attached.attached.binding)&&same(current.subscription.owner,receipt.owner)&&same(current.subscription.snapshot_ref,receipt.snapshot_ref)&&same(ingest.confirmationReceipt(receipt.apply_id),receipt),'changed');},onReconcile(bindingId,receipt));
   if(reconcile&&clock)retain(bindingId,connection,receipt,attached);
   return {state:'sent',apply_id:receipt.apply_id};
  }});

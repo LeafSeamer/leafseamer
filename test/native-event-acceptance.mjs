@@ -40,6 +40,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
   const browser=config.publication_gui,gui=browser?await wait(()=>frames.find(f=>f.event==='gui-endpoint')):null;
   let executionSource=null,referenceTimeline=null;
   const armedDispatch=config.verify_armed_target_dispatch===true;
+  const managedSubscriptions=config.first_enrollment&&config.incremental_source_event&&process.env.LEAFSEAMER_MANAGED_SOURCE_SUBSCRIPTION_TEST==='1';
   const focused=config.focused_dispatch===true;
   if(focused)assert.ok(armedDispatch&&nativeReceiver&&!browser);
   if(armedDispatch){
@@ -55,7 +56,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
   const second=await seamer('initialize',{role:'seamer',material:materials.leaves[1],ca:materials.ca,issuer,principal_id:first.principal_id,
    allowedOrigins:gui?[gui.origin]:[],reconcileIngest:config.verifyEventChannel===true,eventApprovals:config.incremental_source_event===true,
    receiverReference:config.source_reference_capture===true&&!nativeReceiver,nativeReferenceAssets,referenceTimeline,
-   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource});assert.notEqual(first.pid,second.pid);
+   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource,managedSubscriptions});assert.notEqual(first.pid,second.pid);
   if(browser){
    const directory=path.dirname(config.request),siteFile=path.join(directory,'publication-site.json'),assets=path.join(directory,'publication-gui');
    fs.writeFileSync(siteFile,canonical({site_label:'首次配对发布联调',service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,
@@ -199,7 +200,34 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
    const confirmedGeneration=replacement.attached.binding.connection_generation;
    const confirmed=armedDispatch?adopted:await seamer('adoptSnapshot',{...adoption,connection_attempt_id:replacement.connection_attempt_id,confirm:true,transportReady:true});assert.deepEqual(confirmed.receipt,adopted.receipt);assert.equal(confirmed.confirmation.state,'confirmed');assert.equal(confirmed.confirmation.transport_ready,true);assert.equal(confirmed.confirmation.view.ack_cursor,'1');assert.equal(confirmed.confirmation.view.state,'live');assert.equal(confirmed.confirmation.view.binding.connection_generation,confirmedGeneration);assert.equal(confirmed.sources[0].reject_floor,baselineSequence);assert.equal(confirmed.sources[0].state,'baseline_required');assert.notEqual(confirmed.confirmation.view.ack_payload_digest,manifest.manifest_digest);frames.push({event:'native-service-snapshot-confirmed',...confirmed});
    let checkpoint=confirmed.confirmation.view;
-   if(!focused){
+   if(managedSubscriptions&&!armedDispatch){
+    await seamer('detachSubscription',replacement.connection_attempt_id);
+    const target='/auth/local-source-subscriptions/v1',{purpose:_,...request}=subscriptionRequest,body=Buffer.from(canonical({operation:'connect',request}));
+    const post=headers=>requestHttps(second.apiOrigin,materials.ca,{method:'POST',target,body,
+     headers:[['Content-Type','application/json'],['Content-Length',String(body.length)],...headers]});
+    assert.equal((await post([])).status,'401');
+    const auth=[['Authorization','Bearer '+issued.token]];
+    assert.equal((await post([...auth,['X-Forwarded-For','127.0.0.1']])).status,'403');
+    let joined,confirmation;
+    const deadline=performance.now()+5000;
+    do{
+     const response=await post(auth);
+     assert.equal(response.status,'200',response.body.toString());
+     joined=JSON.parse(response.body).result;
+     assert.equal(joined.subscription_id,subQuery.subscription_id);
+     assert.equal(joined.apply_id,adopted.receipt.apply_id);
+     if(joined.transport_ready)break;
+     assert.ok(performance.now()<deadline,'managed source subscription did not become live');
+     await delay(40);
+    }while(true);
+    const {view}=await seamer('getSubscription',subQuery);
+    assert.equal(joined.state,'confirmed');
+    assert.equal(view.binding.connection_generation,String(BigInt(confirmedGeneration)+1n));
+    assert.equal(view.ack_cursor,'2');assert.equal(view.state,'live');
+    confirmation={state:joined.state,apply_id:joined.apply_id,transport_ready:joined.transport_ready,view};
+    frames.push({event:'native-service-snapshot-resumed',confirmation,receipt:adopted.receipt});
+    frames.push({event:'native-managed-source-subscription',result:joined});checkpoint=view;
+   }else if(!focused){
     const resumed=await seamer('resumeSnapshot',{binding_id:active.binding_id,apply_id:adopted.receipt.apply_id,previous_attempt_id:replacement.connection_attempt_id,transportReady:true,options:{replace_existing:true}});
     assert.equal(resumed.connection.attached.binding.connection_generation,String(BigInt(confirmedGeneration)+1n));
     assert.equal(resumed.connection.attached.state,'catching_up');assert.equal(resumed.confirmation.state,'confirmed');assert.equal(resumed.confirmation.transport_ready,true);assert.equal(resumed.confirmation.view.ack_cursor,'2');assert.equal(resumed.confirmation.view.state,'live');assert.deepEqual(resumed.receipt,adopted.receipt);

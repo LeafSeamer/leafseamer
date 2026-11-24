@@ -187,7 +187,8 @@ async function initialize(input,native=null){
    }}:null,
    publicationPolicyFactory,...(native?{supervisedReference:native.supervision,referenceSamplingAuthority:native.samplingAuthority}:
     receiverReference&&{referenceTimeProvider:receiverReferenceFixture}),
-   publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
+   publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,
+    localSourceSubscriptions:input.managedSubscriptions===true,onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
    const descriptor_digest=digest({scope,provider:'test Seamer process domain'});
    const clock_domain_id=eventApprovals?'clock_'+descriptor_digest.slice(7):id();
    return fixture(scope,{source,descriptor:supervisedDomain??{clock_domain_id,descriptor_digest}},{sampleWindowPolicy:'authentication-clock-sample/2'}).provider;
@@ -268,6 +269,7 @@ async function execute(command,value){
   if(command==='createSubscription')return app.pairing.subscriptions.create(value.binding_id,value.request);
   if(command==='getSubscription')return app.pairing.subscriptions.get(value.binding_id,value.subscription_id);
   if(command==='closeSubscription')return app.pairing.subscriptions.close(value.binding_id,value.subscription_id,value.expected_revision);
+  if(command==='detachSubscription'){subscriptionConnections.get(value).close();return true;}
   if(command==='attachSubscription'){const handle=await app.pairing.subscriptions.attach(value.binding_id,value.view,value.options);subscriptionConnections.set(handle.connection_attempt_id,handle);return handle;}
    if(command==='resumeSnapshot'){
     assert.equal(app.pairing.subscriptions.snapshotApplied,undefined);

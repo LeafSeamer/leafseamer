@@ -11,6 +11,7 @@ const protectedWrites=new Set(['publishDefinition','approveDefinitionBindings','
 const bindingView=v=>({scope:v.scope,approval_ref:{id:v.approval_id,revision:v.revision,digest:digest(v)},definition_id:v.definition_id,state:v.state,purpose:v.purpose,registration_ref:v.registration_ref,bundle_digest:v.bundle_digest,bundle:v.bundle});
 const maximumBody=16777216,maximumReserved=33554432;
 const permissionPath='/auth/local-permissions/v1',eventBindingPath='/auth/local-event-bindings/v1',localRequestLimit=32768;
+const sourceSubscriptionPath='/auth/local-source-subscriptions/v1';
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -43,6 +44,10 @@ function failure(error){
  if(['binding_approval_event_source_changed','binding_approval_event_approval_conflict','binding_approval_event_approval_exists','binding_approval_event_approval_revision'].includes(code))return [409,'REVISION_CONFLICT'];
  if(['draft_revision_conflict','metadata_revision_conflict','draft_idempotency_conflict','publication_draft_conflict','publication_idempotency_conflict','binding_approval_conflict','binding_approval_revision','binding_approval_exists','binding_approval_source_changed','run_idempotency_conflict','run_artifact_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
  if(['local_authorization_capacity','local_authorization_context_capacity','draft_capacity','publication_capacity','binding_approval_capacity','binding_approval_event_approval_capacity','peer_binding_capacity','run_capacity'].includes(code))return [429,'CAPACITY_EXCEEDED'];
+ if(code==='managed_subscription_busy')return [429,'CAPACITY_EXCEEDED'];
+ if(['managed_subscription_conflict','managed_subscription_ended','snapshot_ingest_missing','snapshot_ingest_not_current'].includes(code))return [409,'REVISION_CONFLICT'];
+ if(code==='forbidden')return [403,'PERMISSION_DENIED'];
+ if(code==='conflict')return [409,'REVISION_CONFLICT'];
  if(['local_authorization_request','local_authorization_operations','draft_duplicate_selection','automation_schema','binding_approval_request','run_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
  return [503,'WORKER_NOT_READY'];
@@ -53,10 +58,10 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,onFailure=null,protectedIngress=false,pairedIngress=false}){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
  if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
-  if(localPermissions||localEventBindings||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
+  if(localPermissions||localEventBindings||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
    pairedIngress&&(typeof bindingId!=='string'||!receiver||!authorization))fail('protected_ingress_options');
  }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
  if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
@@ -89,7 +94,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    default:fail('local_authorization_request');
   }
  }
- async function serveLocal(req,res,isEventBinding){
+ async function serveLocal(req,res){
   const replyLocal=(status,value)=>{
    if(closed||res.destroyed||res.headersSent)return;
    const bytes=Buffer.from(canonical(value));
@@ -115,16 +120,29 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     const text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);
     body=JSON.parse(text);fields(body,['operation','request']);
     if(canonical(body)!==text)fail('local_authorization_request');
-    if(isEventBinding){
+    if(req.url===sourceSubscriptionPath){
+     if(body.operation!=='connect')fail('local_authorization_request');
+     fields(body.request,['request_id','consumer_id','scope']);
+    }else if(req.url===eventBindingPath){
      const names=eventBindingRequests.get(body.operation);
      if(!names)fail('local_authorization_request');
      fields(body.request,names);
     }else if(body.operation==='inspect')fields(body.request,['principal_id']);
     else if(body.operation!=='replace')fail('local_authorization_request');
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
+   if(req.url===sourceSubscriptionPath){
+    const value=await sourceSubscriptions.connect(body.request,async()=>{
+     const handle=await receiver.prepare({binding_id:bindingId,token});
+     return ()=>{
+      if(closed||res.destroyed)fail('managed_subscription_unavailable');
+      authorization.requireSourceSubscriptionManager(handle);
+     };
+    });
+    replyLocal(200,{result:value});return;
+   }
    const handle=await receiver.prepare({binding_id:bindingId,token});
    if(closed||res.destroyed)return;
-   const value=isEventBinding?await manageEventBinding(handle,body):
+   const value=req.url===eventBindingPath?await manageEventBinding(handle,body):
     body.operation==='inspect'?authorization.get(handle,body.request.principal_id):authorization.replace(handle,body.request);
    replyLocal(200,{result:value});
   }catch(error){
@@ -218,10 +236,10 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
   finally{pending--;reserved-=length;}
  }
  const server=https.createServer({cert,key,minVersion:'TLSv1.3',maxVersion:'TLSv1.3',maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000,keepAliveTimeout:1000},(req,res)=>{
-  if(req.url===permissionPath||req.url===eventBindingPath){
-   const isEventBinding=req.url===eventBindingPath;
-   if(!(isEventBinding?localEventBindings:localPermissions)){empty(res,404);return;}
-   void serveLocal(req,res,isEventBinding).catch(error=>{observe(error);empty(res,503);});return;
+  if(req.url===permissionPath||req.url===eventBindingPath||req.url===sourceSubscriptionPath){
+   const enabled=req.url===sourceSubscriptionPath?sourceSubscriptions:req.url===eventBindingPath?localEventBindings:localPermissions;
+   if(!enabled){empty(res,404);return;}
+   void serveLocal(req,res).catch(error=>{observe(error);empty(res,503);});return;
   }
   if(req.method==='OPTIONS'){
    const method=req.headers['access-control-request-method'],headers=(req.headers['access-control-request-headers']??'').toLowerCase().split(',').map(x=>x.trim()).filter(Boolean);

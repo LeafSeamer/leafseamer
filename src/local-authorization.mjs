@@ -159,6 +159,7 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
    current(principal,expected){inside();need(same(fixed,expected)&&uuid(principal),'issuer');const id=subject({issuer_id:fixed.issuer_id,issuer_epoch:fixed.issuer_epoch,principal_id:principal,principal_kind:'human'});need(id,'missing');return current(id);}
   }),
   get(handle,principal){return writer(()=>{const actor=authorized(handle,'auth.read');need(uuid(principal),'request');const id=subject({issuer_id:fixed.issuer_id,issuer_epoch:fixed.issuer_epoch,principal_id:principal,principal_kind:'human'}),value=id?current(id):null;recheck(handle,actor);return value;});},
+  requireSourceSubscriptionManager(handle){return writer(()=>{const actor=manager(handle);recheck(handle,actor,true);});},
   replace(handle,request){
    need(fields(request,['request_id','principal_id','principal_kind','expected_revision','permissions','definition_scope','not_before_ns','expires_ns'])&&uuid(request.request_id)&&uuid(request.principal_id)&&['human','service'].includes(request.principal_kind),'request');
    need(request.expected_revision===null||typeof request.expected_revision==='string'&&/^[1-9][0-9]{0,19}$/.test(request.expected_revision)&&request.expected_revision.length<=20,'request');
