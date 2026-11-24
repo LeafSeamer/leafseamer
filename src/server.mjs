@@ -194,7 +194,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(Number(storage.identity.schema_revision)>=3){bindingReceiver=createPeerBindingReceiver({service:storage.identity,pairings:peerApi,clock:authentication,transport:peerTransport});bindingApprovals=storage.bindBindingApprovals({receiver:bindingReceiver,eventReceiver});}
   if(publicApi!==null)publicTransport=await startDraftHttp({host:publicApi.host??'127.0.0.1',port:publicApi.port??0,cert:publicApi.cert,key:publicApi.key,bindingId:publicApi.binding_id,
    allowedOrigins:publicApi.allowedOrigins??[],localPermissions:publicApi.localPermissions===true,localEventBindings:publicApi.localEventBindings===true,
-   localRunApprovals:publicApi.localRunApprovals===true,armPreflight:installedArmPolicy!==undefined,sourceSubscriptions,onFailure:publicApi.onFailure??null,
+   localRunApprovals:publicApi.localRunApprovals===true,localRunArm:installedArmPolicy!==undefined,sourceSubscriptions,onFailure:publicApi.onFailure??null,
    service:storage.identity,bootId:storage.serviceBootId,receiver:identityReceiver,authorization,bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs});
   if(storage.runs?.scanArmPreparation)armPreparationDelivery=startOutboxDelivery({scan:storage.runs.scanArmPreparation,
    async deliver(item){return (await storage.runs.deliverArmPreparation(item)).state;},pageSize:4});

@@ -773,13 +773,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {preflight_ref:preflightReference(reference.object_id,hash),preflight};
   });
  }
- async function armRun(authentication,id,request){
-  checked('LifecycleId',id);
-  need(fields(request,'context,preflight_ref')&&fields(request.context,'context_id,idempotency_key'),'run_arm_request');
-  const {context,preflight_ref}=structuredClone(request);
-  for(const value of Object.values(context))checked('LifecycleId',value);
-  checkPreflightReference(preflight_ref);
-  const requestDigest=digest({operation_id:'armRun',run_id:id,preflight_ref});
+ async function reserveArm(authentication,id,{context,preflight_ref,expected_run_revision},requestDigest){
   function lookup(){
    const run=proposalRun(id),actor=authority.identifyRunApprovalActorInTransaction(authentication);
    need(actor.principal_kind==='human','run_arm_authorization');
@@ -796,20 +790,27 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {...result,proof:authorize(authentication,'armRun',result.run.definition_id,context.context_id)};
   });
   if(prepared.prior)return prepared.prior;
-  const saved=getArmPreflight(authentication,preflight_ref),{observation,window,basis_digest}=saved.preflight;
-  need(observation.run_id===id&&observation.can_arm===true,'run_arm_preflight_ineligible');
-  writer(()=>checkPreflightWindow(window));
+  const saved=preflight_ref?getArmPreflight(authentication,preflight_ref):null;
+  if(saved){
+   const {observation,window}=saved.preflight;
+   need(observation.run_id===id&&observation.can_arm===true,'run_arm_preflight_ineligible');
+   writer(()=>checkPreflightWindow(window));
+  }
+  const revision=saved?.preflight.observation.run_revision??expected_run_revision;
   try{
-   return await observeArmPrerequisites(authentication,id,observation.run_revision,current=>{
+   return await observeArmPrerequisites(authentication,id,revision,(current,reader)=>{
     const {prior,key}=lookup();if(prior)return prior;
-    checkPreflightWindow(window);
+    if(saved)checkPreflightWindow(saved.preflight.window);
     const proof=authorize(authentication,'armRun',current.run.definition_id,context.context_id);
     need(key===prepared.key&&same(proof,prepared.proof),'run_authorization_changed');
-    need(current.observation.can_arm===true&&digest({observation:current.observation,basis:current.basis})===basis_digest,'run_preflight_changed');
+    if(saved)need(current.observation.can_arm===true&&
+     digest({observation:current.observation,basis:current.basis})===saved.preflight.basis_digest,'run_preflight_changed');
+    else need(current.observation.can_arm===true,'run_arm_preflight_ineligible');
     authority.assertRunCapacityInTransaction(proof);
-    const result=arm.reserve({run:current.run,preflight:saved,context,proof,key,requestDigest});
+    const preflight=saved??writeArmPreflight(current,reader);
+    const result=arm.reserve({run:current.run,preflight,context,proof,key,requestDigest});
     need(same(proof,authorize(authentication,'armRun',current.run.definition_id,context.context_id)),'run_authorization_changed');
-    checkPreflightWindow(window);
+    checkPreflightWindow(preflight.preflight.window);
     return result;
    });
   }catch(error){
@@ -818,24 +819,44 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    throw error;
   }
  }
+ async function armRun(authentication,id,request){
+  checked('LifecycleId',id);
+  need(fields(request,'context,preflight_ref')&&fields(request.context,'context_id,idempotency_key'),'run_arm_request');
+  const fixed=structuredClone(request);
+  for(const value of Object.values(fixed.context))checked('LifecycleId',value);
+  checkPreflightReference(fixed.preflight_ref);
+  return reserveArm(authentication,id,fixed,digest({operation_id:'armRun',run_id:id,preflight_ref:fixed.preflight_ref}));
+ }
+ async function observeAndArmRun(authentication,id,request){
+  checked('LifecycleId',id);
+  need(fields(request,'context,expected_run_revision')&&fields(request.context,'context_id,idempotency_key'),'run_arm_request');
+  const fixed=structuredClone(request);
+  for(const value of Object.values(fixed.context))checked('LifecycleId',value);
+  checked('LifecycleRevision',fixed.expected_run_revision);
+  return reserveArm(authentication,id,fixed,digest({operation_id:'observeAndArmRun',run_id:id,expected_run_revision:fixed.expected_run_revision}));
+ }
+ function writeArmPreflight({observation,basis,start},proof,armContext=null){
+  const now=authority.runApprovalTimeInTransaction();
+  const window={service_boot_id:bootId,domain:start.domain,issued_tick_ns:String(now.tick),expires_tick_ns:String(start.tick+preflightWindowNs)};
+  need(now.tick>=start.tick,'run_preflight_expired');checkPreflightWindow(window,now);
+  const preflight_id=crypto.randomUUID(),preflight={format:'leafseamer.run-arm-preflight/1',preflight_id,window,observation,basis,
+   basis_digest:digest({observation,basis}),reader:{actor:proof.actor,authorization_digest:proof.authorization_digest,
+    ...(armContext!==null&&{arm_context_id:armContext})}};
+  const text=canonical(preflight),hash=digest(preflight);
+  need(Buffer.byteLength(text)<=1048576&&db.prepare('SELECT count(*) FROM automation_run_preflight').pluck().get()<16384,'run_preflight_capacity');
+  need(db.prepare('INSERT INTO automation_run_preflight VALUES(?,?,?,?,?)').run(preflight_id,observation.run_id,bootId,text,hash).changes===1,'run_preflight_storage');
+  return {preflight_ref:preflightReference(preflight_id,hash),preflight};
+ }
  function recordArmPreflight(authentication,id,expectedRevision,armContext=null){
   if(armContext!==null)checked('LifecycleId',armContext);
-  return observeArmPrerequisites(authentication,id,expectedRevision,({observation,basis,start},proof)=>{
+  return observeArmPrerequisites(authentication,id,expectedRevision,(current,proof)=>{
    const armProof=armContext===null?null:authorize(authentication,'armRun',proof.definition_id,armContext);
-   const now=authority.runApprovalTimeInTransaction();
-   const window={service_boot_id:bootId,domain:start.domain,issued_tick_ns:String(now.tick),expires_tick_ns:String(start.tick+preflightWindowNs)};
-   need(now.tick>=start.tick,'run_preflight_expired');checkPreflightWindow(window,now);
-   const preflight_id=crypto.randomUUID(),preflight={format:'leafseamer.run-arm-preflight/1',preflight_id,window,observation,basis,
-    basis_digest:digest({observation,basis}),reader:{actor:proof.actor,authorization_digest:proof.authorization_digest,
-     ...(armProof&&{arm_context_id:armContext})}};
-   const text=canonical(preflight),hash=digest(preflight);
-   need(Buffer.byteLength(text)<=1048576&&db.prepare('SELECT count(*) FROM automation_run_preflight').pluck().get()<16384,'run_preflight_capacity');
    if(armProof)authority.assertRunCapacityInTransaction(armProof);
-   need(db.prepare('INSERT INTO automation_run_preflight VALUES(?,?,?,?,?)').run(preflight_id,id,bootId,text,hash).changes===1,'run_preflight_storage');
-   if(basis.admission)arm.assertPolicy(observation,basis);
+   const saved=writeArmPreflight(current,proof,armContext);
+   if(current.basis.admission)arm.assertPolicy(current.observation,current.basis);
    if(armProof)need(same(armProof,authorize(authentication,'armRun',proof.definition_id,armContext)),'run_authorization_changed');
-   need(same(proof,authorize(authentication,'getRun',proof.definition_id,null)),'run_authorization_changed');checkPreflightWindow(window);
-   return {preflight_ref:preflightReference(preflight_id,hash),preflight};
+   need(same(proof,authorize(authentication,'getRun',proof.definition_id,null)),'run_authorization_changed');checkPreflightWindow(saved.preflight.window);
+   return saved;
   });
  }
  async function revalidateArmPreflight(authentication,reference){
@@ -1104,6 +1125,9 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  }
  async function completeArmRun(authentication,reference){
   const fixed=structuredClone(reference);
+  need(fields(fixed,'digest,kind,object_id,revision,scope')&&fixed.kind==='run_arm_operation'&&fixed.revision==='1'&&
+   same(fixed.scope,scope),'run_arm_request');
+  checked('LifecycleId',fixed.object_id);checked('LifecycleDigest',fixed.digest);
   function authorizeCompletion(registered,write){
    const operation=registered.operation;
    const proof=authorize(authentication,write?'armRun':'getRun',operation.definition_id,write?operation.context_id:null);
@@ -1258,7 +1282,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     });
    }
   }),
-  ...(arm&&{armRun,prepareArmPlanForPeer,armPreparationIntents(reference){
+  ...(arm&&{armRun,observeAndArmRun,prepareArmPlanForPeer,armPreparationIntents(reference){
    return writer(()=>{
     const registered=registeredArm(reference);
     if(registered.operation.targets.length===0)return [];

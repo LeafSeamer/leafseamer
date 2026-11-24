@@ -22,9 +22,12 @@ const runApprovalRequests=new Map([
  ['inspect',['run_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
- ['record-arm-preflight',['run_id','expected_revision','context_id']]
+ ['record-arm-preflight',['run_id','expected_revision','context_id']],
+ ['arm',['run_id','reservation']],
+ ['observe-and-arm',['run_id','reservation']],
+ ['complete-arm',['operation_ref']]
 ]);
-const armPreflightOperations=new Set(['create-arm-context','record-arm-preflight']);
+const armOperations=new Set(['create-arm-context','record-arm-preflight','arm','observe-and-arm','complete-arm']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -52,7 +55,7 @@ function readBody(req,res,length){
 function failure(error){
  const code=error?.code??error?.message;
  if(code==='http_token'||code==='peer_identity_inactive'||code==='peer_identity_handle')return [401,'AUTH_REQUIRED'];
- if(['local_authorization_object','definition_missing','draft_request_missing','publication_missing','binding_approval_missing','binding_approval_definition_missing','binding_approval_event_approval_missing','run_missing','run_arm_definition_missing'].includes(code))return [404,'NOT_FOUND'];
+ if(['local_authorization_object','definition_missing','draft_request_missing','publication_missing','binding_approval_missing','binding_approval_definition_missing','binding_approval_event_approval_missing','run_missing','run_arm_definition_missing','run_preflight_missing','run_initiator_missing'].includes(code))return [404,'NOT_FOUND'];
  if(['local_authorization_denied','local_authorization_missing','local_authorization_context','local_authorization_recent','http_origin','http_csrf','local_authorization_human','publication_human_required','binding_approval_publication_policy','binding_approval_publication_binding_unapproved','binding_approval_event_approval_context'].includes(code))return [403,'PERMISSION_DENIED'];
  if(['binding_approval_event_source_changed','binding_approval_event_approval_conflict','binding_approval_event_approval_exists','binding_approval_event_approval_revision'].includes(code))return [409,'REVISION_CONFLICT'];
  if(['draft_revision_conflict','metadata_revision_conflict','draft_idempotency_conflict','publication_draft_conflict','publication_idempotency_conflict','binding_approval_conflict','binding_approval_revision','binding_approval_exists','binding_approval_source_changed','run_idempotency_conflict','run_artifact_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
@@ -63,7 +66,12 @@ function failure(error){
  if(code==='conflict')return [409,'REVISION_CONFLICT'];
  if(['run_proposal_request','run_approval_request','run_approval_targets'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
-  'run_preflight_transition','run_preflight_changed','run_preflight_expired'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
+ if(code==='run_preflight_expired')return [409,'PREFLIGHT_EXPIRED'];
+ if(code==='run_arm_preflight_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
+ if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
+ if(['run_arm_request','run_preflight_reference'].includes(code))return [422,'INVALID_REQUEST'];
+ if(code==='run_arm_completion_authorization')return [403,'PERMISSION_DENIED'];
  if(code==='run_preflight_capacity')return [429,'CAPACITY_EXCEEDED'];
  if(['local_authorization_request','local_authorization_operations','draft_duplicate_selection','automation_schema','binding_approval_request','run_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
@@ -75,10 +83,10 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,armPreflight=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,localRunArm=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
  if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
-  if(localPermissions||localEventBindings||localRunApprovals||armPreflight||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
+  if(localPermissions||localEventBindings||localRunApprovals||localRunArm||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
    pairedIngress&&(typeof bindingId!=='string'||!receiver||!authorization))fail('protected_ingress_options');
  }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
  if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
@@ -127,6 +135,11 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'record-arm-preflight':
     if(typeof request.context_id!=='string')fail('local_authorization_request');
     return runs.recordArmPreflight(handle,request.run_id,request.expected_revision,request.context_id);
+   case 'arm':return runs.armRun(handle,request.run_id,request.reservation);
+   case 'observe-and-arm':return runs.observeAndArmRun(handle,request.run_id,request.reservation);
+   case 'complete-arm':
+    if(!request.operation_ref||typeof request.operation_ref!=='object'||Array.isArray(request.operation_ref))fail('local_authorization_request');
+    return runs.completeArmRun(handle,request.operation_ref);
    default:fail('local_authorization_request');
   }
  }
@@ -166,7 +179,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     }else if(body.operation==='inspect')fields(body.request,['principal_id']);
     else if(body.operation!=='replace')fail('local_authorization_request');
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
-   if(req.url===runApprovalPath&&armPreflightOperations.has(body.operation)&&!armPreflight){empty(res,404);return;}
+   if(req.url===runApprovalPath&&armOperations.has(body.operation)&&!localRunArm){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});
