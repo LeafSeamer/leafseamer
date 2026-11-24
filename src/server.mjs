@@ -19,12 +19,15 @@ import {fields,same} from './runtime/auth-clock-value.mjs';
 import {contractSelection} from './sdk/index.mjs';
 
 export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticationProvider=null,referenceTimeProvider=null,
- supervisedReference=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
+ supervisedReference=null,linuxBootstrap=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
  armAdmissionPolicy=null,executionNotificationSink=null,protectedIngress=null}={}){
  if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535)throw new Error('listen_options');
  if(authenticationProvider!==null&&typeof authenticationProvider!=='function')throw new Error('authentication_provider');
  if(referenceTimeProvider!==null&&(typeof referenceTimeProvider!=='function'||pairing===null))throw new Error('receiver_reference_provider');
  if(supervisedReference!==null&&(authenticationProvider===null||pairing===null))throw new Error('reference_supervisor_options');
+ if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,
+  publicationSource,publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink,protectedIngress].some(value=>value!==null))
+  throw new Error('bootstrap_linux_options');
  if(referenceSamplingAuthority!==null&&(typeof referenceSamplingAuthority!=='function'||supervisedReference===null||referenceTimeProvider!==null))
   throw new Error('reference_sampling_authority');
  if(publicationPolicyFactory!==null&&(publicationPolicy!==null||publicationSource!==null||typeof publicationPolicyFactory!=='function'))
@@ -50,10 +53,16 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  const closeFailedStartup=async error=>{
   // 监督管道关闭后宿主可立即回收核心，先交付已分类的启动诊断。
   try{await onStartupFailure?.(error);}catch{/* 不用诊断写入错误替换原启动失败。 */}
-  try{await supervisedReference?.close();}finally{try{authentication?.stop();}finally{storage.close();}}
+  try{await supervisedReference?.close();linuxBootstrap?.close();}finally{try{authentication?.stop();}finally{storage.close();}}
  };
  try{
   const source=openNativeClock(),identity=storage.identity;
+  if(linuxBootstrap){
+   if(Number(identity.schema_revision)<20)throw new Error('bootstrap_linux_schema');
+   const accepted=await linuxBootstrap.accept({identity,source});
+   storage.adoptLinuxCoreRuntime(accepted);
+   accepted.assertCurrent();
+  }
   if(notificationSink)executionNotifications=storage.bindExecutionNotifications(notificationSink.consumerId);
   if(supervisedReference&&Number(identity.schema_revision)<20)throw new Error('reference_supervisor_schema');
   if(referenceSamplingAuthority&&Number(identity.schema_revision)<21)throw new Error('reference_sampling_schema');
@@ -199,7 +208,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
   close(){return stopping??=(async()=>{identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
    const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),supervisedReference?.close()]);
-   try{authentication.stop();}finally{storage.close();}
+   try{linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}
  });
 }

@@ -3,6 +3,16 @@
   "source_repository": "https://github.com/LeafSeamer/leafseamer-controller",
   "source_commit": "b8c323f77c7276bc3d7a71693392d4143dce26bf",
   "files": {
+    "src/core-bootstrap.mjs": {
+      "source": "src/core-bootstrap.mjs",
+      "source_commit": "80361debcda1e6ada7c76f15382bde6193cbcc78",
+      "sha256": "e911a3aaa3eb21c151b7d47e62ac04dd39f2aaa227ee60f3df09a2e2cbbfeb01"
+    },
+    "src/linux-core-bootstrap.mjs": {
+      "source": "src/linux-core-bootstrap.mjs",
+      "source_commit": "31cc3627ce5d4787e3a012de51febe2f8bd7b8cd",
+      "sha256": "da191fcdfa407837f6a6d6f9a623e0005668a4902dce850b785ad5d70c1d6070"
+    },
     "src/runtime/auth-clock.mjs": {
       "source": "src/auth-clock.mjs",
       "sha256": "fc68a5db1710c19c2fd9ec01c67e3858c6e4ea83a8bd5cd07ef09b98ef823242"

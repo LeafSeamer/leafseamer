@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path';
+import {canonical} from './runtime/auth-clock-value.mjs';
 import {importFirstPairingAuthorization,initializeStorage,migrateStorage,openStorage,StorageError} from './storage.mjs';
 import {startSeamer} from './server.mjs';
 import {completeLocalFirstPairing,openInstalledPublicationPolicy,openPairingClock,readLocalFile,readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
@@ -9,13 +10,13 @@ function readFirstPairingFile(file,limit){
  try{return readLocalFile(file,limit);}catch{throw new StorageError('first_pairing_input_file');}
 }
 const supervisorOptions=['--bootstrap-policy','--supervisor-pipe','--supervisor-channel','--time-provider-intent'];
-async function serve(options,contained,referenceSamplingAuthority,onStartupFailure,protectedIngress){
+async function serve(options,contained,referenceSamplingAuthority,onStartupFailure,protectedIngress,containedLinux){
  const port=options['--port']??'0',file=options['--pairing-profile'];
  if(!/^(0|[1-9][0-9]{0,4})$/.test(port)||file!==undefined&&!path.isAbsolute(file))throw new Error('arguments');
  const profile=file===undefined?null:readTrustedPairingProfile(file),stopRequest=new AbortController(),{signal}=stopRequest;
  if(contained&&(!profile||!supervisorOptions.every(name=>options[name])))throw new Error('reference_supervisor_options');
  const publish=contained?value=>process.stderr.write(JSON.stringify(value)+'\n'):emit;
- let app,stopping,supervisedReference=null,control='';
+ let app,stopping,supervisedReference=null,linuxBootstrap=null,control='';
  const stopInput=()=>{
   if(!contained)return;
   process.stdin.removeListener('data',onControl);process.stdin.removeListener('end',stop);process.stdin.removeListener('error',stop);
@@ -35,6 +36,15 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
  };
  process.once('SIGINT',stop);process.once('SIGTERM',stop);
  try{
+  if(containedLinux){
+   const raw=options['--bootstrap-policy'];
+   if(process.platform!=='linux'||typeof raw!=='string'||Buffer.byteLength(raw)>8192)throw new Error('bootstrap_policy');
+   const {validateBootstrapPolicy}=await import('./core-bootstrap.mjs');
+   const {openLinuxCoreBootstrap}=await import('./linux-core-bootstrap.mjs');
+   const policy=validateBootstrapPolicy(JSON.parse(raw));
+   if(canonical(policy)!==raw)throw new Error('bootstrap_policy');
+   linuxBootstrap=openLinuxCoreBootstrap(policy,'seamer');
+  }
   if(contained){
    const {createSupervisedReference}=await import('./supervised-reference.mjs').catch(error=>{
     if(error.code==='ERR_MODULE_NOT_FOUND')throw new Error('reference_supervisor_unavailable');
@@ -48,8 +58,9 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
    }});
   }
   app=await startSeamer({dataDir:options['--data-dir'],host:options['--host']??'127.0.0.1',port:Number(port),
-   supervisedReference,referenceSamplingAuthority,onStartupFailure,protectedIngress,...(profile&&{pairing:profile.pairing,publicApi:profile.publicApi,authenticationProvider:input=>openPairingClock(profile,input,publish,signal),
+   supervisedReference,linuxBootstrap,referenceSamplingAuthority,onStartupFailure,protectedIngress,...(profile&&{pairing:profile.pairing,publicApi:profile.publicApi,authenticationProvider:input=>openPairingClock(profile,input,publish,signal),
     publicationPolicyFactory:profile.publicationPolicy?input=>openInstalledPublicationPolicy(profile.publicationPolicy,input):null})});
+  linuxBootstrap?.monitor(stop);
   if(signal.aborted){await stop();return;}
   if(profile){
    if(!app.authenticationStatus().qualified)throw new Error('pairing_clock_unqualified');
@@ -64,7 +75,7 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
   if(signal.aborted){await stop();return;}
   await app?.close().catch(()=>{});app=null;throw error;
  }finally{
-  if(!app){await supervisedReference?.close();stopInput();}
+  if(!app){await supervisedReference?.close();linuxBootstrap?.close();stopInput();}
   if(!app||signal.aborted){process.removeListener('SIGINT',stop);process.removeListener('SIGTERM',stop);}
  }
 }
@@ -79,10 +90,11 @@ async function report(error){
 try{
  const [command,...args]=argv,options={};
  const contained=command==='contained-core-auth';
+ const containedLinux=command==='contained-core-linux';
  const ingress=command==='start-protected-ingress';
  const importOptions=['--authorization-file','--controller-certificate','--seamer-certificate'];
- if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
- const allowed=['--data-dir',...(command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
+ if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','contained-core-linux','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
+ const allowed=['--data-dir',...(containedLinux?['--host','--port','--bootstrap-policy']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
  for(let i=0;i<args.length;i+=2){if(!allowed.includes(args[i])||Object.hasOwn(options,args[i]))throw new Error('arguments');options[args[i]]=args[i+1];}
  if(!options['--data-dir']||!path.isAbsolute(options['--data-dir']))throw new Error('arguments');
  if(command==='init-storage')emit({event:'storage_initialized',...initializeStorage(options['--data-dir']),ready:false});
@@ -95,7 +107,7 @@ try{
   emit({event:'first_pairing_imported',...result,ready:false});
  }
  else return await serve(options,contained,referenceSamplingAuthority,contained?report:null,
-  ingress?readProtectedIngressProfile(options['--ingress-profile']):null);
+  ingress?readProtectedIngressProfile(options['--ingress-profile']):null,containedLinux);
 }catch(error){
  process.exitCode=1;await report(error);
 }

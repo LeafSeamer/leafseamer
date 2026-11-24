@@ -196,17 +196,31 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
    need(bindingApprovals?.preparePublication,'publication_source_unavailable');return bindingApprovals.preparePublication(draft,publicationPolicy);
   };
   const publications=automationPublicationStore({db,service:value,isOpen:()=>!closed,authority,source:publicationSource,approvedBindings});
+  function saveCoreRuntime({intent,descriptor,receipt},policy,code){
+   need(db.prepare('INSERT INTO core_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId,receipt.receipt_id,receipt.bootstrap_id,receipt.member_boot_id,
+    ...[intent,descriptor,receipt,policy].map(canonical)).changes===1,code);
+  }
   const storage=Object.freeze({identity:value,serviceBootId:bootId,authenticationClock:authenticationClockStore(db,{service_id:value.service_id,service_boot_id:bootId}),
+   adoptLinuxCoreRuntime({binding,policy,assertCurrent}){
+    need(!closed&&!db.inTransaction&&Number(value.schema_revision)>=20,'bootstrap_linux_schema');
+    need(binding.receipt.containment_ref.backend==='linux_cgroup_v2'&&binding.receipt.gate_state==='closed'&&
+     binding.intent.service_id===value.service_id&&policy.service_id===value.service_id&&policy.database_instance_id===value.database_instance_id,
+    'bootstrap_linux_scope');
+    db.transaction(()=>{
+     assertCurrent();
+     saveCoreRuntime(binding,policy,'bootstrap_linux_storage');
+     assertCurrent();
+    }).immediate();
+   },
    adoptReferenceRuntime({core,policy,binding,assertCurrent}){
     need(!closed&&!db.inTransaction&&Number(value.schema_revision)>=20,'reference_supervisor_schema');
-    const {intent,descriptor,receipt}=core,{text,digest:runtimeDigest,runtimeId,memberBoot}=binding;
+    const {text,digest:runtimeDigest,runtimeId,memberBoot}=binding;
     const runtime=JSON.parse(text),{launch_intent:launch,admission_receipt:provider}=runtime;
     need(canonical(runtime)===text&&runtimeDigest==='sha256:'+crypto.createHash('sha256').update(text).digest('hex')&&provider.member_boot_id===memberBoot,
      'reference_supervisor_integrity');
     db.transaction(()=>{
      assertCurrent();
-     need(db.prepare('INSERT INTO core_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId,receipt.receipt_id,receipt.bootstrap_id,receipt.member_boot_id,
-      ...[intent,descriptor,receipt,policy].map(canonical)).changes===1,'reference_supervisor_storage');
+     saveCoreRuntime(core,policy,'reference_supervisor_storage');
      need(db.prepare('INSERT INTO time_provider_runtime_binding VALUES(?,?,?,?,?,?,?,?)').run(bootId,runtimeId,launch.launch_id,provider.receipt_id,
       provider.bootstrap_id,memberBoot,text,runtimeDigest).changes===1,'reference_supervisor_storage');
      assertCurrent();

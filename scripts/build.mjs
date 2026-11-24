@@ -60,6 +60,10 @@ const sdkLicense=await fs.readFile(new URL('../LICENSE',sdkRoot));if(hash(sdkLic
 files.push(['sdk/build-manifest.json',sdkManifestBytes],['sdk/LICENSE',sdkLicense]);
 const lock=JSON.parse(await fs.readFile(path.join(root,'runtime-inputs.json'),'utf8'));
 for(const [name,entry]of Object.entries(lock.files))if(hash(await fs.readFile(path.join(root,name)))!==entry.sha256)throw new Error('shared_runtime_drift');
+const linuxBootstrap=process.platform==='linux';
+if(linuxBootstrap){
+ for(const name of ['core-bootstrap.mjs','linux-core-bootstrap.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+}
 const firstPairingRuntime=new Map();
 for(const name of ['first-pairing-authorization.mjs','peer-pairing-store.mjs']){
  const bytes=await fs.readFile(path.join(root,'src/runtime',name));
@@ -97,12 +101,13 @@ if(supervisionMatches){
  for(const name of supervisionNames){
   const bytes=await fs.readFile(new URL('dist/'+name,controllerRoot));
   if(hash(bytes)!==supervisionPins[name])throw new Error('supervision_runtime_drift');
-  files.push([name,bytes]);
+  if(!linuxBootstrap||name!=='core-bootstrap.mjs')files.push([name,bytes]);
  }
  for(const name of ['supervised-reference.mjs','reference-sampling.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
  files.push(['native-clock.mjs',Buffer.from("export {clockInteger,openNativeClock} from './runtime/native-clock.mjs';\n")]);
  files.push(['auth-clock-value.mjs',Buffer.from("export {canonical,digest,same} from './runtime/auth-clock-value.mjs';\n")]);
 }
+if(linuxBootstrap&&!supervisionMatches)files.push(['runtime/canonicalize.mjs',Buffer.from("export {default} from 'canonicalize';\n")]);
 const controllerLicense=await fs.readFile(new URL('LICENSE',controllerRoot));if(hash(controllerLicense)!==pairingLock.license_sha256)throw new Error('pairing_license_drift');
 files.push(['runtime/PAIRING-LICENSE',controllerLicense]);
 const validationLock=JSON.parse(await fs.readFile(path.join(root,'validation-runtime.json'),'utf8'));
