@@ -12,6 +12,16 @@ const bindingView=v=>({scope:v.scope,approval_ref:{id:v.approval_id,revision:v.r
 const maximumBody=16777216,maximumReserved=33554432;
 const permissionPath='/auth/local-permissions/v1',eventBindingPath='/auth/local-event-bindings/v1',localRequestLimit=32768;
 const sourceSubscriptionPath='/auth/local-source-subscriptions/v1';
+const runApprovalPath='/auth/local-run-approvals/v1';
+const runApprovalRequests=new Map([
+ ['targets',['run_id']],
+ ['create-proposal-context',['ttl_ms','max_unique_requests']],
+ ['propose',['run_id','proposal']],
+ ['create-approval-context',['ttl_ms','max_unique_requests']],
+ ['approve',['run_id','approval']],
+ ['inspect',['run_id']],
+ ['inspect-arm-prerequisites',['run_id','expected_revision']]
+]);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -48,6 +58,9 @@ function failure(error){
  if(['managed_subscription_conflict','managed_subscription_ended','snapshot_ingest_missing','snapshot_ingest_not_current'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='forbidden')return [403,'PERMISSION_DENIED'];
  if(code==='conflict')return [409,'REVISION_CONFLICT'];
+ if(['run_proposal_request','run_approval_request','run_approval_targets'].includes(code))return [422,'INVALID_REQUEST'];
+ if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
+  'run_preflight_transition','run_preflight_changed'].includes(code))return [409,'REVISION_CONFLICT'];
  if(['local_authorization_request','local_authorization_operations','draft_duplicate_selection','automation_schema','binding_approval_request','run_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
  return [503,'WORKER_NOT_READY'];
@@ -58,18 +71,21 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
  if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
-  if(localPermissions||localEventBindings||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
+  if(localPermissions||localEventBindings||localRunApprovals||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
    pairedIngress&&(typeof bindingId!=='string'||!receiver||!authorization))fail('protected_ingress_options');
  }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
  if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
  if(localEventBindings&&typeof bindingApprovals?.approveEventCurrent!=='function')throw new Error('pairing_profile_event_bindings_unavailable');
+ if(localRunApprovals&&typeof runs?.inspectArmPrerequisites!=='function')fail('pairing_profile_run_approvals_unavailable');
  for(const origin of allowedOrigins){const url=new URL(origin);if(url.protocol!=='https:'||url.origin!==origin)throw new Error('draft_http_origin');}
  const csrfKey=crypto.randomBytes(32);
  const csrfFor=(context,token,origin)=>crypto.createHmac('sha256',csrfKey).update(JSON.stringify([service.service_id,bootId,context,token,origin])).digest('base64url');
  const adapter=createHttpAdapter(selection),origins=new Set(allowedOrigins);let origin,site,authority,closed=false,pending=0,reserved=0;
+ const localRoutes=new Map([[permissionPath,localPermissions],[eventBindingPath,localEventBindings],
+  [sourceSubscriptionPath,sourceSubscriptions],[runApprovalPath,localRunApprovals]]);
  const validHost=value=>value===site.host||value===authority;
  const observe=error=>{try{onFailure?.({name:error?.name??'Error',code:error?.reason??error?.code??'http_internal'});}catch{}};
  const empty=(res,status)=>{if(!res.headersSent&&!res.destroyed){res.writeHead(status,{'Cache-Control':'no-store','Content-Length':'0',Connection:'close'});res.end();}};
@@ -91,6 +107,18 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'inspect':return eventApprovalView(bindingApprovals.getEventApproval(handle,request.approval_id));
    case 'revoke':return eventApprovalView(bindingApprovals.revokeEventApproval(handle,request.approval,
     {context_id:request.context_id,operation_id:'revokeBindingApproval'}));
+   default:fail('local_authorization_request');
+  }
+ }
+ function manageRunApproval(handle,{operation,request}){
+  switch(operation){
+   case 'targets':return runs.deviceTargets(handle,request.run_id);
+   case 'create-proposal-context':return authorization.createRunApprovalContext(handle,request);
+   case 'propose':return runs.createApprovalProposal(handle,request.run_id,request.proposal);
+   case 'create-approval-context':return authorization.createApproveRunContext(handle,request);
+   case 'approve':return runs.approve(handle,request.run_id,request.approval);
+   case 'inspect':return runs.getCurrentApproval(handle,request.run_id);
+   case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    default:fail('local_authorization_request');
   }
  }
@@ -123,8 +151,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     if(req.url===sourceSubscriptionPath){
      if(body.operation!=='connect')fail('local_authorization_request');
      fields(body.request,['request_id','consumer_id','scope']);
-    }else if(req.url===eventBindingPath){
-     const names=eventBindingRequests.get(body.operation);
+    }else if(req.url===eventBindingPath||req.url===runApprovalPath){
+     const names=(req.url===eventBindingPath?eventBindingRequests:runApprovalRequests).get(body.operation);
      if(!names)fail('local_authorization_request');
      fields(body.request,names);
     }else if(body.operation==='inspect')fields(body.request,['principal_id']);
@@ -142,8 +170,10 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    }
    const handle=await receiver.prepare({binding_id:bindingId,token});
    if(closed||res.destroyed)return;
-   const value=req.url===eventBindingPath?await manageEventBinding(handle,body):
-    body.operation==='inspect'?authorization.get(handle,body.request.principal_id):authorization.replace(handle,body.request);
+   let value;
+   if(req.url===eventBindingPath)value=await manageEventBinding(handle,body);
+   else if(req.url===runApprovalPath)value=await manageRunApproval(handle,body);
+   else value=body.operation==='inspect'?authorization.get(handle,body.request.principal_id):authorization.replace(handle,body.request);
    replyLocal(200,{result:value});
   }catch(error){
    observe(error);if(typeof error==='number'){empty(res,error);return;}
@@ -236,9 +266,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
   finally{pending--;reserved-=length;}
  }
  const server=https.createServer({cert,key,minVersion:'TLSv1.3',maxVersion:'TLSv1.3',maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000,keepAliveTimeout:1000},(req,res)=>{
-  if(req.url===permissionPath||req.url===eventBindingPath||req.url===sourceSubscriptionPath){
-   const enabled=req.url===sourceSubscriptionPath?sourceSubscriptions:req.url===eventBindingPath?localEventBindings:localPermissions;
-   if(!enabled){empty(res,404);return;}
+  if(localRoutes.has(req.url)){
+   if(!localRoutes.get(req.url)){empty(res,404);return;}
    void serveLocal(req,res).catch(error=>{observe(error);empty(res,503);});return;
   }
   if(req.method==='OPTIONS'){

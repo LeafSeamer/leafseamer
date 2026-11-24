@@ -59,17 +59,18 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
   let publicApi=null;
   if(Object.hasOwn(value,'public_api')){
    const api=value.public_api;
+   const optional=['local_event_bindings','local_source_subscriptions','local_run_approvals'];
    fields(api,['host','port','certificate_file','private_key_file','binding_id','allowed_origins','local_permissions',
-    ...(Object.hasOwn(api,'local_event_bindings')?['local_event_bindings']:[]),
-    ...(Object.hasOwn(api,'local_source_subscriptions')?['local_source_subscriptions']:[])]);
+    ...optional.filter(key=>Object.hasOwn(api,key))]);
    pairingUuid(api.binding_id);
    need(loopback(api.host)&&Number.isInteger(api.port)&&api.port>0&&api.port<=65535&&
     (api.host!==local.host||api.port!==local.port)&&Array.isArray(api.allowed_origins)&&api.allowed_origins.length<=8&&
     new Set(api.allowed_origins).size===api.allowed_origins.length&&api.allowed_origins.every(httpsOrigin)&&
     typeof api.local_permissions==='boolean'&&
-    ['local_event_bindings','local_source_subscriptions'].every(key=>!Object.hasOwn(api,key)||typeof api[key]==='boolean'),'pairing_profile_public_api');
+    optional.every(key=>!Object.hasOwn(api,key)||typeof api[key]==='boolean'),'pairing_profile_public_api');
    publicApi={host:api.host,port:api.port,binding_id:api.binding_id,allowedOrigins:api.allowed_origins,localPermissions:api.local_permissions,
     localEventBindings:api.local_event_bindings===true,localSourceSubscriptions:api.local_source_subscriptions===true,
+    localRunApprovals:api.local_run_approvals===true,
     cert:readFile(api.certificate_file,65536),key:readFile(api.private_key_file,65536)};
   }
   const publicationPolicy=value.publication_policy??null;
