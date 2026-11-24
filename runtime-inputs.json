@@ -17,13 +17,13 @@
     },
     "src/runtime/native-clock.mjs": {
       "source": "src/native-clock.mjs",
-      "source_commit": "d827a1704b0bd8e0a1e01c123086b651b8646d1b",
-      "sha256": "e7b64e88fcd392e2b07b25afe1eeb26044e11a0fed008a528f5d38cf802fbc19"
+      "source_commit": "10b3466ffc1aa8abf3d9a95239755405b3957322",
+      "sha256": "db12f5200105dff2cb73e62e1a9a1eb9a9247ca94a83ab1a60fcb43d52dd5b53"
     },
     "native/clock.cc": {
       "source": "native/clock.cc",
-      "source_commit": "d827a1704b0bd8e0a1e01c123086b651b8646d1b",
-      "sha256": "c4140b4628e4341a5fc368ba1209599b7a763d8229fab0a42a15b233ec111c47"
+      "source_commit": "10b3466ffc1aa8abf3d9a95239755405b3957322",
+      "sha256": "84d352b60c28f574c52bb8b5362bd36907ee2b4295cc62dd56de8f9c2d2bec48"
     },
     "native-inputs.json": {
       "source": "native-inputs.json",

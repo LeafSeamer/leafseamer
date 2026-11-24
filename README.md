@@ -22,7 +22,7 @@ node --disallow-code-generation-from-strings dist/cli.mjs start --data-dir <数�
 
 Linux构建省略 `--node-library`。也可显式运行 `npm run build -- --native-artifacts <制品绝对目录>`，采用 `runtime-inputs.json` 中固定摘要的现有原生时钟制品。采用路径核验制品清单、构建时的源码和 CMake 摘要、平台、Node 版本及二进制，本机构建核验当前源码。完成构建后可用 `npm pack --ignore-scripts` 打包，安装包运行不依赖邻仓路径。
 
-Linux 原生采集与 Controller 共用墙钟跳变观察。采集前后的绝对 `CLOCK_REALTIME` timerfd 报告跳变或观察失效时，当前采集立即拒绝，故障在原生实例内锁存。单调读数仍供期限检查。宿主连续性、授时环境和认证资格继续由可信部署核验。[Linux timerfd 手册](https://man7.org/linux/man-pages/man2/timerfd_create.2.html)
+Linux 原生采集与 Controller 共用挂起及墙钟跳变检查。采集前后同步核验 `CLOCK_BOOTTIME` 和 `CLOCK_MONOTONIC` 的偏移，并检查绝对 `CLOCK_REALTIME` timerfd。发现确定的偏移变化、墙钟跳变或观察失效时，当次采集拒绝并在原生实例内锁存故障。单调读数仍供期限检查。活动部署电源策略、授时环境和认证资格还需独立验收。[Linux 时钟手册](https://man7.org/linux/man-pages/man2/clock_gettime.2.html) · [Linux timerfd 手册](https://man7.org/linux/man-pages/man2/timerfd_create.2.html)
 
 初始化以独占创建生成Seamer自己的service_id、database_instance_id和request_epoch；已存在文件拒绝覆盖。SQLite固定引擎与来源，使用WAL、FULL同步、外键和排他连接。每次运行生成新boot，普通重启保留稳定身份。数据库版本、迁移摘要或完整性异常拒绝打开；进程异常退出保留未关闭boot历史，不推断任何运行已经安全完成。
 
