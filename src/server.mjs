@@ -36,10 +36,13 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(publicationPolicyFactory!==null&&(publicationPolicy!==null||publicationSource!==null||typeof publicationPolicyFactory!=='function'))
   throw new Error('publication_source_configuration');
  if(publicApi!==null){if(pairing===null)throw new Error('public_api_pairing_required');pairingUuid(publicApi.binding_id);}
+ const composePairing=protectedIngress!==null&&linuxPairing&&publicApi!==null;
  if(protectedIngress!==null){
-  if([authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,publicationSource,
+  if([authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,...(composePairing?[]:[pairing,publicApi]),publicationSource,
    publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink].some(value=>value!==null)||
    (linuxClockEvidenceProfile!==null&&linuxClockEvidenceProfile.authentication!==true))throw new Error('protected_ingress_options');
+  if(composePairing&&(pairing.host!==protectedIngress.host||pairing.port!==9443||pairing.network!==true||
+   publicApi.host!=='127.0.0.1'||publicApi.port!==8444))throw new Error('pairing_profile_compose');
   fields(protectedIngress.identity,['service_id','database_instance_id']);
   pairingUuid(protectedIngress.identity.service_id);pairingUuid(protectedIngress.identity.database_instance_id);
   assertProtectedDraftAddress(protectedIngress.host,protectedIngress.port);
@@ -49,7 +52,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   pairingUuid(notificationSink.consumerId);
   if(typeof notificationSink.deliver!=='function')throw new Error('execution_notification_sink');
  }
- let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null;
+ let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null,linuxRuntime=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
  const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy,expectedIdentity:protectedIngress?.identity??null});
@@ -62,7 +65,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  try{
   const linuxAuthentication=linuxClockEvidenceProfile?.authentication===true;
   const identity=storage.identity;
-  let source=openNativeClock(),linuxRuntime=null;
+  let source=openNativeClock();
   if(linuxBootstrap){
    if(Number(identity.schema_revision)<20)throw new Error('bootstrap_linux_schema');
    const accepted=await linuxBootstrap.accept({identity,source});
@@ -123,6 +126,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  catch(error){server.close();await closeFailedStartup(error);throw error;}
  const closeHttp=()=>new Promise((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeAllConnections();});
  let peerTransport=null,peerApi=null,identityReceiver=null,authorization=null,publicTransport=null,management=null,bindingReceiver=null,bindingApprovals=null,eventReceiver=null,subscriptions=null,snapshotReceiver=null,snapshotIngest=null,reconcile=null,snapshotConfirmation=null,runEndorsementReader=null,runProtectionDelivery=null;
+ let ingressTransport=null;
  let armPreparationDelivery=null;
  let bindingRevocationScanFailures=0;
  const delegate=(method,args)=>{if(!management||typeof management[method]!=='function')throw new Error('peer_pairing_management_unavailable');return management[method](...args);};
@@ -190,18 +194,25 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  }
  if(protectedIngress!==null){
   const {host,port,cert,key,origin}=protectedIngress;
-  publicTransport=await startDraftHttp({host,port,cert,key,service:storage.identity,bootId:storage.serviceBootId,
-   allowedOrigins:[origin],protectedIngress:true});
+  ingressTransport=await startDraftHttp({host,port,cert,key,service:storage.identity,bootId:storage.serviceBootId,
+   allowedOrigins:[origin],...(composePairing?{pairedIngress:true,bindingId:publicApi.binding_id,receiver:identityReceiver,authorization,
+    bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs}:{protectedIngress:true})});
  }
  if(executionNotifications)executionNotificationDelivery=startExecutionNotificationDelivery(executionNotifications,notificationSink.deliver);
- }catch(error){identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close()]);await closeFailedStartup(error);throw error;}
+ }catch(error){identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close()]);await closeFailedStartup(error);throw error;}
  sampling?.start();
  const {stageFirstPairing,readFirstPairingCompletion,activateFirstPairing,...normalPairing}=peerApi??{};
  const assertFirstPairingManagement=()=>{if(management!==authorization.pairingManagement)throw new Error('peer_pairing_first_enrollment_management');};
  let stopping;
  return Object.freeze({address:server.address(),identity:storage.identity,serviceBootId:storage.serviceBootId,collectorBinding,
   ...(sampling&&{referenceSampling:Object.freeze({current:sampling.current,status:sampling.status,receiverReference:sampling.receiverReference})}),
-  authenticationStatus:()=>authentication.status(),authorization,bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs,publicOrigin:publicTransport?.origin??null,
+  authenticationStatus:()=>authentication.status(),authorization,bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs,publicOrigin:(ingressTransport??publicTransport)?.origin??null,
+  ...(composePairing&&stageFirstPairing&&{adoptFirstPairing(bytes,controllerCertificate){
+   assertFirstPairingManagement();
+   return storage.adoptFirstPairing({bytes,controllerCertificate,seamerCertificate:pairing.cert},publicApi.binding_id,()=>{
+    linuxRuntime.assertLive();authentication.pairingSample();
+   });
+  }}),
   ...(executionNotificationDelivery&&{executionNotificationStatus:executionNotificationDelivery.status}),
   pairing:peerTransport?Object.freeze({api:Object.freeze(normalPairing),transport:peerTransport,identityReceiver,eventReceiver,subscriptions,snapshotReceiver,snapshotIngest,snapshotConfirmation,sourceEvent:reconcile?.sourceEvent??null,runEndorsementReader,
    ...(stageFirstPairing&&{stageFirstPairing(id){assertFirstPairingManagement();return stageFirstPairing(id,publicApi?.binding_id??null);},
@@ -227,7 +238,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    }:null,runApprovalProtectionStatus:()=>runProtectionDelivery?{...runProtectionDelivery.status(),binding_revocation_scan_failed:bindingRevocationScanFailures}:null,
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
   close(){return stopping??=(async()=>{identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
-   const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),supervisedReference?.close()]);
+   const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close()]);
    try{linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}
  });

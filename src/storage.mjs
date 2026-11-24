@@ -201,6 +201,16 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
     ...[intent,descriptor,receipt,policy].map(canonical)).changes===1,code);
   }
   const storage=Object.freeze({identity:value,serviceBootId:bootId,authenticationClock:authenticationClockStore(db,{service_id:value.service_id,service_boot_id:bootId}),
+   adoptFirstPairing(input,bindingId,assertCurrent){
+    need(!closed&&!db.inTransaction&&Number(value.schema_revision)>=19,'first_pairing_import_migration_required');
+    return db.transaction(()=>{
+     assertCurrent();
+     const result=saveFirstPairingImport(db,value,input);
+     need(result.binding_id===bindingId,'first_pairing_import_binding');
+     assertCurrent();
+     return result;
+    }).immediate();
+   },
    adoptLinuxCoreRuntime({binding,policy,assertCurrent}){
     need(!closed&&!db.inTransaction&&Number(value.schema_revision)>=20,'bootstrap_linux_schema');
     need(binding.receipt.containment_ref.backend==='linux_cgroup_v2'&&binding.receipt.gate_state==='closed'&&

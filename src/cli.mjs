@@ -1,20 +1,41 @@
 #!/usr/bin/env node
+import fs from 'node:fs';
 import path from 'node:path';
+import {setTimeout as delay} from 'node:timers/promises';
 import {canonical} from './runtime/auth-clock-value.mjs';
 import {importFirstPairingAuthorization,initializeStorage,migrateStorage,openStorage,StorageError} from './storage.mjs';
 import {startSeamer} from './server.mjs';
 import {completeLocalFirstPairing,openInstalledPublicationPolicy,openPairingClock,readLocalFile,readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
 import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
-import {readLinuxClockEvidenceProfile} from './runtime/linux-clock-evidence.mjs';
+import {readLinuxClockEvidenceProfile,readLinuxProtectedFile} from './runtime/linux-clock-evidence.mjs';
 const emit=value=>process.stdout.write(JSON.stringify(value)+'\n');
 function readFirstPairingFile(file,limit){
  try{return readLocalFile(file,limit);}catch{throw new StorageError('first_pairing_input_file');}
 }
 const supervisorOptions=['--bootstrap-policy','--supervisor-pipe','--supervisor-channel','--time-provider-intent'];
+const pairingInbox='/run/leafseamer-first-pairing';
+async function readFirstPairingInbox(signal){
+ const file=pairingInbox+'/authorization.json';
+ for(;;){
+  signal.throwIfAborted();
+  const stat=fs.lstatSync(file,{throwIfNoEntry:false});
+  if(stat){
+   if(!stat.isFile()||stat.uid!==0||stat.gid!==process.getegid()||(stat.mode&0o777)!==0o640)throw new StorageError('first_pairing_input_file');
+   return readLinuxProtectedFile(file,32768);
+  }
+  await delay(200,undefined,{signal});
+ }
+}
 async function serve(options,contained,referenceSamplingAuthority,onStartupFailure,protectedIngress,containedLinux){
  const port=options['--port']??'0',file=options['--pairing-profile'];
  if(!/^(0|[1-9][0-9]{0,4})$/.test(port)||file!==undefined&&!path.isAbsolute(file))throw new Error('arguments');
  const profile=file===undefined?null:readTrustedPairingProfile(file,{linux:containedLinux}),stopRequest=new AbortController(),{signal}=stopRequest;
+ const inbox=options['--first-pairing-inbox'];
+ if(inbox!==undefined){
+  const stat=inbox===pairingInbox?fs.lstatSync(inbox,{throwIfNoEntry:false}):null;
+  if(!protectedIngress||!containedLinux||!profile?.publicApi||profile.authorizationId!==null||
+     !stat?.isDirectory()||stat.uid!==0||(stat.mode&0o022)!==0)throw new StorageError('first_pairing_input_file');
+ }
  if(contained&&(!profile||!supervisorOptions.every(name=>options[name])))throw new Error('reference_supervisor_options');
  const publish=contained?value=>process.stderr.write(JSON.stringify(value)+'\n'):emit;
  let app,stopping,supervisedReference=null,linuxBootstrap=null,linuxClockEvidenceProfile=null,control='';
@@ -76,7 +97,14 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
   }
   publish({event:'listening',...app.identity,service_boot_id:app.serviceBootId,host:app.address.address,port:app.address.port,
    ...(app.publicOrigin&&{public_origin:app.publicOrigin}),...(app.collectorBinding&&{reference_collector:app.collectorBinding}),ready:false});
-  if(profile&&profile.authorizationId!==null)await completeLocalFirstPairing(app.pairing,profile.authorizationId,publish,signal,profile.publicApi?.binding_id??null);
+  let authorizationId=profile?.authorizationId??null;
+  if(inbox!==undefined){
+   if(!app.adoptFirstPairing)throw new Error('pairing_profile_migration_required');
+   const bytes=await readFirstPairingInbox(signal);
+   try{const adopted=app.adoptFirstPairing(bytes,Buffer.from(profile.peer.cert));authorizationId=adopted.authorization_id;}
+   finally{bytes.fill(0);}
+  }
+  if(authorizationId!==null)await completeLocalFirstPairing(app.pairing,authorizationId,publish,signal,profile.publicApi?.binding_id??null);
   return app;
  }catch(error){
   if(signal.aborted){await stop();return;}
@@ -102,7 +130,7 @@ try{
  const ingress=command==='start-protected-ingress'||composeCore;
  const importOptions=['--authorization-file','--controller-certificate','--seamer-certificate'];
  if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','contained-core-linux','contained-compose-linux','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
- const allowed=['--data-dir',...(composeCore?['--bootstrap-policy','--ingress-profile','--clock-evidence-profile']:containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
+ const allowed=['--data-dir',...(composeCore?['--bootstrap-policy','--ingress-profile','--clock-evidence-profile','--pairing-profile','--first-pairing-inbox']:containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
  for(let i=0;i<args.length;i+=2){if(!allowed.includes(args[i])||Object.hasOwn(options,args[i]))throw new Error('arguments');options[args[i]]=args[i+1];}
  if(!options['--data-dir']||!path.isAbsolute(options['--data-dir']))throw new Error('arguments');
  if(command==='init-storage')emit({event:'storage_initialized',...initializeStorage(options['--data-dir']),ready:false});

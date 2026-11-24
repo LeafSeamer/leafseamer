@@ -53,10 +53,11 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,onFailure=null,protectedIngress=false}){
- if(protectedIngress){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,onFailure=null,protectedIngress=false,pairedIngress=false}){
+ if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
-  if(bindingId!==undefined||receiver||authorization||localPermissions||localEventBindings)fail('protected_ingress_options');
+  if(localPermissions||localEventBindings||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
+   pairedIngress&&(typeof bindingId!=='string'||!receiver||!authorization))fail('protected_ingress_options');
  }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
  if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
  if(localEventBindings&&typeof bindingApprovals?.approveEventCurrent!=='function')throw new Error('pairing_profile_event_bindings_unavailable');
@@ -234,6 +235,6 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
  try{await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});}
  catch(error){server.close();throw error;}
  authority=(isIP(host)===6?'['+host+']':host)+':'+server.address().port;
- origin='https://'+authority;site=new URL(origin);if(!protectedIngress)origins.add(origin);let stopping;
+ origin='https://'+authority;site=new URL(origin);if(!protectedIngress&&!pairedIngress)origins.add(origin);let stopping;
  return Object.freeze({origin,close(){return stopping??=(async()=>{closed=true;await new Promise((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeAllConnections();});})();}});
 }
