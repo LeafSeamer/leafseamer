@@ -42,7 +42,7 @@ for(const name of ['storage-v25.sql','automation-execution-store.mjs'])files.pus
 files.push(['storage-v26.sql',await fs.readFile(path.join(root,'src','storage-v26.sql'))]);
 files.push(['storage-v27.sql',await fs.readFile(path.join(root,'src','storage-v27.sql'))]);
 files.push(['storage-v28.sql',await fs.readFile(path.join(root,'src','storage-v28.sql'))]);
-for(const name of ['storage-v29.sql','storage-v30.sql','storage-v31.sql','storage-v32.sql','storage-v33.sql','automation-execution-notification.mjs','automation-execution-commit.mjs','automation-submission-store.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['storage-v29.sql','storage-v30.sql','storage-v31.sql','storage-v32.sql','storage-v33.sql','storage-v34.sql','automation-execution-notification.mjs','automation-execution-commit.mjs','automation-submission-store.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['trusted-pairing-profile.mjs','protected-ingress-profile.mjs','installed-arm-admission-policy.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['run-approval-store.mjs',await fs.readFile(path.join(root,'src','run-approval-store.mjs'))]);
 for(const name of ['peer-identity-watermark.mjs','peer-identity-watermark.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
@@ -83,7 +83,11 @@ const controllerManifestBytes=await fs.readFile(new URL('dist/build-manifest.jso
 const controllerManifestDigest=hash(controllerManifestBytes);
 const overrides=controllerManifestDigest===pairingLock.manifest_sha256?{}:pairingLock.additional_manifests?.[controllerManifestDigest];
 if(!overrides)throw new Error('pairing_runtime_drift');
-const {'supervisor-control.mjs':supervisorOverride,...pairingOverrides}=overrides;
+const supervisionNames=['core-bootstrap.mjs','supervisor-control.mjs','authority-source-window.mjs','time-provider-link.mjs','runtime/canonicalize.mjs',
+ 'time-provider-polls.mjs','time-provider-capture.mjs','reference-time-anchor.mjs','reference-time-bundle.mjs','reference-time-scheduler.mjs'];
+const {'linux-reference-provider.mjs':linuxReferencePin,...serviceOverrides}=overrides;
+const supervisionOverrides=Object.fromEntries(Object.entries(serviceOverrides).filter(([name])=>supervisionNames.includes(name)));
+const pairingOverrides=Object.fromEntries(Object.entries(serviceOverrides).filter(([name])=>!supervisionNames.includes(name)));
 if(Object.keys(pairingOverrides).some(name=>!Object.hasOwn(pairingLock.artifacts,name)&&
  !['peer-action-binding.mjs','peer-automation-command.mjs'].includes(name))||
  hash(await fs.readFile(path.join(root,'src/runtime/auth-clock-value.mjs')))!==pairingLock.auth_clock_value_sha256)throw new Error('pairing_runtime_drift');
@@ -95,13 +99,10 @@ if(!Object.hasOwn({...pairingLock.artifacts,...pairingOverrides},'peer-automatio
  const missing="const unavailable=()=>{throw Object.assign(new Error('execution_submission_transport_unavailable'),{code:'execution_submission_transport_unavailable'});};\n";
  files.push(['runtime/peer-automation-command.mjs',Buffer.from(missing+"export {unavailable as automationCommandRequest,unavailable as automationCommandIdentity,unavailable as automationCommandAdjudication};\n")]);
 }
-const supervisionNames=['core-bootstrap.mjs','supervisor-control.mjs','authority-source-window.mjs','time-provider-link.mjs','runtime/canonicalize.mjs',
- 'time-provider-polls.mjs','time-provider-capture.mjs','reference-time-anchor.mjs','reference-time-bundle.mjs','reference-time-scheduler.mjs'];
-const supervisionPins=supervisorOverride===undefined?pairingLock.supervision_artifacts:
- {...pairingLock.supervision_artifacts,'supervisor-control.mjs':supervisorOverride};
+const supervisionPins={...pairingLock.supervision_artifacts,...supervisionOverrides};
 if(Object.keys(supervisionPins).length!==supervisionNames.length||!supervisionNames.every(name=>/^[a-f0-9]{64}$/.test(supervisionPins[name])))throw new Error('supervision_runtime_lock');
 const supervisionMatches=supervisionNames.every(name=>controllerManifest.artifacts[name]===supervisionPins[name]);
-if(supervisorOverride!==undefined&&!supervisionMatches)throw new Error('supervision_runtime_drift');
+if(Object.keys(supervisionOverrides).length&&!supervisionMatches)throw new Error('supervision_runtime_drift');
 if(supervisionMatches){
  for(const name of supervisionNames){
   const bytes=await fs.readFile(new URL('dist/'+name,controllerRoot));
@@ -113,6 +114,12 @@ if(supervisionMatches){
  files.push(['auth-clock-value.mjs',Buffer.from("export {canonical,digest,same} from './runtime/auth-clock-value.mjs';\n")]);
 }
 if(linuxBootstrap&&!supervisionMatches)files.push(['runtime/canonicalize.mjs',Buffer.from("export {default} from 'canonicalize';\n")]);
+if(linuxBootstrap&&linuxReferencePin!==undefined){
+ const name='linux-reference-provider.mjs',bytes=await fs.readFile(new URL('dist/'+name,controllerRoot));
+ if(!supervisionMatches||controllerManifest.artifacts[name]!==linuxReferencePin||hash(bytes)!==linuxReferencePin)
+  throw new Error('linux_reference_runtime_drift');
+ files.push([name,bytes]);
+}
 const controllerLicense=await fs.readFile(new URL('LICENSE',controllerRoot));if(hash(controllerLicense)!==pairingLock.license_sha256)throw new Error('pairing_license_drift');
 files.push(['runtime/PAIRING-LICENSE',controllerLicense]);
 const validationLock=JSON.parse(await fs.readFile(path.join(root,'validation-runtime.json'),'utf8'));

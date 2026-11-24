@@ -85,8 +85,10 @@ const migration32Sql=fs.readFileSync(new URL('./storage-v32.sql',import.meta.url
 const migration32Digest='sha256:'+crypto.createHash('sha256').update(migration32Sql).digest('hex');
 const migration33Sql=fs.readFileSync(new URL('./storage-v33.sql',import.meta.url),'utf8');
 const migration33Digest='sha256:'+crypto.createHash('sha256').update(migration33Sql).digest('hex');
-const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql];
-const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest];
+const migration34Sql=fs.readFileSync(new URL('./storage-v34.sql',import.meta.url),'utf8');
+const migration34Digest='sha256:'+crypto.createHash('sha256').update(migration34Sql).digest('hex');
+const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql,migration34Sql];
+const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest,migration34Digest];
 const applicationId=0x4c53534d;
 const engine={version:'3.53.4',source:'2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'};
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -226,6 +228,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
     need(!closed&&!db.inTransaction&&Number(value.schema_revision)>=20,'reference_supervisor_schema');
     const {text,digest:runtimeDigest,runtimeId,memberBoot}=binding;
     const runtime=JSON.parse(text),{launch_intent:launch,admission_receipt:provider}=runtime;
+    if(runtime.format==='leafseamer-time-provider-runtime-binding/2')need(Number(value.schema_revision)>=34,'reference_supervisor_schema');
     need(canonical(runtime)===text&&runtimeDigest==='sha256:'+crypto.createHash('sha256').update(text).digest('hex')&&provider.member_boot_id===memberBoot,
      'reference_supervisor_integrity');
     db.transaction(()=>{

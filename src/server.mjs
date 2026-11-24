@@ -57,6 +57,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(typeof notificationSink.deliver!=='function')throw new Error('execution_notification_sink');
  }
  let authentication,installedPolicy,installedArmPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null,linuxRuntime=null;
+ let linuxCollector=null,linuxReference=null,linuxBinding=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
  const armPolicy=armAdmissionApproval===null?armAdmissionPolicy:{needsArtifactSize:true,inspectInTransaction(input){
@@ -67,7 +68,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  const closeFailedStartup=async error=>{
   // 监督管道关闭后宿主可立即回收核心，先交付已分类的启动诊断。
   try{await onStartupFailure?.(error);}catch{/* 不用诊断写入错误替换原启动失败。 */}
-  try{await supervisedReference?.close();linuxBootstrap?.close();}finally{try{authentication?.stop();}finally{storage.close();}}
+  try{await supervisedReference?.close();linuxCollector?.close();linuxReference?.socket.destroy();linuxBootstrap?.close();}
+  finally{try{authentication?.stop();}finally{storage.close();}}
  };
  try{
   const linuxAuthentication=linuxClockEvidenceProfile?.authentication===true;
@@ -77,7 +79,14 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    if(Number(identity.schema_revision)<20)throw new Error('bootstrap_linux_schema');
    const accepted=await linuxBootstrap.accept({identity,source});
    linuxRuntime=accepted;
-   storage.adoptLinuxCoreRuntime(accepted);
+   linuxReference=accepted.referenceProvider??null;
+   if(linuxReference){
+    const {sealTimeProviderRuntime}=await import('./time-provider-link.mjs');
+    linuxBinding=sealTimeProviderRuntime({identity,serviceBootId:storage.serviceBootId,core:accepted.binding,provider:linuxReference.provider});
+    storage.adoptReferenceRuntime({core:accepted.binding,policy:accepted.policy,binding:linuxBinding,assertCurrent(){
+     accepted.assertCurrent();linuxReference.assertCurrent();
+    }});
+   }else storage.adoptLinuxCoreRuntime(accepted);
    if(linuxClockEvidenceProfile!==null){
     if(linuxAuthentication)source=openNativeClock({linuxWithoutSystemSleep:true});
     clockEvidence=inspectLinuxClockEvidence(linuxClockEvidenceProfile,storage.authenticationClock.scope,accepted,source);
@@ -93,6 +102,15 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   authentication=startAuthenticationClock(source,storage.authenticationClock,provider??null,
    {waitForInitialEvidence:linuxAuthentication,renewableHealth:linuxAuthentication});
   if(linuxPairing)await waitForLinuxAuthentication(authentication,linuxRuntime.signal);
+  if(linuxReference){
+   const {openTimeProviderLink}=await import('./time-provider-link.mjs');
+   linuxCollector=await openTimeProviderLink(linuxBinding,{connection:linuxReference.socket,assertCurrent:linuxReference.assertCurrent,
+    readAuthentication(){try{return authentication.referenceTimeSample();}catch{return null;}}});
+   linuxCollector.onLost(()=>linuxBootstrap.close());
+   linuxCollector.assertCurrent();
+   collectorBinding=Object.freeze({runtime_id:linuxBinding.runtimeId,runtime_digest:linuxBinding.digest,
+    clock_domain_ref:linuxRuntime.binding.receipt.domain_ref,provider_pid:linuxReference.provider.process_observation.provider_pid});
+  }
   if(armAdmissionApproval!==null){
    fields(armAdmissionApproval,['approval_file','approval_sha256']);
    installedArmPolicy=openInstalledArmAdmissionPolicy(armAdmissionApproval,{identity,clock:authentication});
@@ -102,7 +120,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    return storage.openReferenceSampling({...input,authority});
   };
   const collectorRuntime=await supervisedReference?.connect({identity,serviceBootId:storage.serviceBootId,authentication,adopt:storage.adoptReferenceRuntime,openSampling});
-  collectorBinding=collectorRuntime?.binding??null;
+  collectorBinding=collectorRuntime?.binding??collectorBinding;
   sampling=collectorRuntime?.sampling??null;
   referenceProvider=sampling?.receiverReference??null;
   if(referenceTimeProvider!==null){
@@ -256,7 +274,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
   close(){return stopping??=(async()=>{sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
    const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close()]);
-   try{linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
+   try{linuxCollector?.close();linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}
  });
 }

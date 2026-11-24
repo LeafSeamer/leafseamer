@@ -71,6 +71,20 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
    if(profile&&(!linuxClockEvidenceProfile?.authentication||profile.scope.service_id!==policy.service_id||
     profile.scope.database_instance_id!==policy.database_instance_id))throw new Error('pairing_profile_identity');
    linuxBootstrap=openLinuxCoreBootstrap(policy,'seamer',{compose:protectedIngress!==null});
+   const artifactDigest=options['--reference-provider'];
+   if(artifactDigest!==undefined){
+    const {openLinuxReferenceProvider}=await import('./linux-reference-provider.mjs').catch(()=>{
+     throw new Error('bootstrap_linux_reference_unavailable');
+    });
+    const core=linuxBootstrap;
+    linuxBootstrap=Object.freeze({...core,async accept(input){
+     if(Number(input.identity.schema_revision)<34)throw new Error('reference_supervisor_schema');
+     const result=await core.accept(input);
+     const referenceProvider=await openLinuxReferenceProvider({core:result.binding,artifactDigest,
+      timeoutMs:policy.bootstrap_timeout_ms,assertLive:result.assertLive});
+     return {...result,referenceProvider};
+    }});
+   }
   }
   if(contained){
    const {createSupervisedReference}=await import('./supervised-reference.mjs').catch(error=>{
@@ -131,7 +145,7 @@ try{
  const ingress=command==='start-protected-ingress'||composeCore;
  const importOptions=['--authorization-file','--controller-certificate','--seamer-certificate'];
  if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','contained-core-linux','contained-compose-linux','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
- const allowed=['--data-dir',...(composeCore?['--bootstrap-policy','--ingress-profile','--clock-evidence-profile','--pairing-profile','--first-pairing-inbox']:containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
+ const allowed=['--data-dir',...(composeCore?['--bootstrap-policy','--ingress-profile','--clock-evidence-profile','--pairing-profile','--first-pairing-inbox','--reference-provider']:containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
  for(let i=0;i<args.length;i+=2){if(!allowed.includes(args[i])||Object.hasOwn(options,args[i]))throw new Error('arguments');options[args[i]]=args[i+1];}
  if(!options['--data-dir']||!path.isAbsolute(options['--data-dir']))throw new Error('arguments');
  if(command==='init-storage')emit({event:'storage_initialized',...initializeStorage(options['--data-dir']),ready:false});
