@@ -17,11 +17,13 @@
     },
     "src/runtime/native-clock.mjs": {
       "source": "src/native-clock.mjs",
-      "sha256": "e71b15efba87ed20f20ca581b6ae332fdaf7063364afe5229a215c81b2c251ec"
+      "source_commit": "d827a1704b0bd8e0a1e01c123086b651b8646d1b",
+      "sha256": "e7b64e88fcd392e2b07b25afe1eeb26044e11a0fed008a528f5d38cf802fbc19"
     },
     "native/clock.cc": {
       "source": "native/clock.cc",
-      "sha256": "aa43575288a2c40dfcef46799a968e76b9169efc763b20067e0bfead5fe7d315"
+      "source_commit": "d827a1704b0bd8e0a1e01c123086b651b8646d1b",
+      "sha256": "c4140b4628e4341a5fc368ba1209599b7a763d8229fab0a42a15b233ec111c47"
     },
     "native-inputs.json": {
       "source": "native-inputs.json",
@@ -32,6 +34,7 @@
     "win32-x64": {
       "binary_sha256": "7044c6e414dc57675176382bc6375d0dd25bea3f5ed85d235d8230c1cd3da7ec",
       "manifest_sha256": "ea6fe2cda1d94814b965a3024017a9bc86feccc051f719e2446febf8c059d0aa",
+      "source_sha256": "aa43575288a2c40dfcef46799a968e76b9169efc763b20067e0bfead5fe7d315",
       "source_cmake_sha256": "2207aa2f76705f10a7a939c3cc7477b14c8e947151277840f011b00674b0b533"
     }
   },

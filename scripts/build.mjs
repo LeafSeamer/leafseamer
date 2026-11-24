@@ -122,10 +122,13 @@ if(Object.keys(validationLock.artifacts).length!==4)throw new Error('validation_
 files.push(['validation/LICENSE',controllerLicense]);
 const profile=process.platform+'-'+process.arch,nativeRoot=nativeArtifacts??path.join(root,'logs/native-clock/artifacts',profile);
 const manifestBytes=await fs.readFile(path.join(nativeRoot,'manifest.json')),manifest=JSON.parse(manifestBytes),binary=await fs.readFile(path.join(nativeRoot,'leafseamer_clock.node'));
+const pinned=nativeArtifacts===undefined?null:lock.prebuilt_profiles[profile];
+if(nativeArtifacts!==undefined&&(!pinned||pinned.manifest_sha256!==hash(manifestBytes)||pinned.binary_sha256!==hash(binary)||
+ pinned.source_cmake_sha256!==manifest.cmake_source_sha256))throw new Error('native_prebuilt_mismatch');
+const sourceDigest=pinned?pinned.source_sha256:hash(await fs.readFile(path.join(root,'native/clock.cc')));
 if(manifest.format!=='leafseamer-native-artifact/1'||manifest.platform!==process.platform||manifest.arch!==process.arch||manifest.napi_version!==8||manifest.node_version!==process.versions.node||manifest.binary_sha256!==hash(binary)||
- manifest.source_sha256!==hash(await fs.readFile(path.join(root,'native/clock.cc')))||manifest.inputs_sha256!==hash(await fs.readFile(path.join(root,'native-inputs.json'))))throw new Error('native_build_drift');
-if(nativeArtifacts!==undefined){const pinned=lock.prebuilt_profiles[profile];if(!pinned||pinned.manifest_sha256!==hash(manifestBytes)||pinned.binary_sha256!==hash(binary)||pinned.source_cmake_sha256!==manifest.cmake_source_sha256)throw new Error('native_prebuilt_mismatch');}
-else if(manifest.cmake_source_sha256!==hash(await fs.readFile(path.join(root,'native/CMakeLists.txt'))))throw new Error('native_build_drift');
+ !/^[a-f0-9]{64}$/.test(sourceDigest??'')||manifest.source_sha256!==sourceDigest||manifest.inputs_sha256!==hash(await fs.readFile(path.join(root,'native-inputs.json'))))throw new Error('native_build_drift');
+if(!pinned&&manifest.cmake_source_sha256!==hash(await fs.readFile(path.join(root,'native/CMakeLists.txt'))))throw new Error('native_build_drift');
 files.push(['runtime/native/leafseamer_clock.node',binary],['runtime/native/manifest.json',manifestBytes]);
 const output=path.resolve(root,'dist');if(path.dirname(output)!==path.resolve(root))throw new Error('output_path');
 await fs.rm(output,{recursive:true,force:true});await fs.mkdir(output,{recursive:true});
