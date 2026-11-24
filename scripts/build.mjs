@@ -60,7 +60,7 @@ const sdkLicense=await fs.readFile(new URL('../LICENSE',sdkRoot));if(hash(sdkLic
 files.push(['sdk/build-manifest.json',sdkManifestBytes],['sdk/LICENSE',sdkLicense]);
 const lock=JSON.parse(await fs.readFile(path.join(root,'runtime-inputs.json'),'utf8'));
 for(const [name,entry]of Object.entries(lock.files))if(hash(await fs.readFile(path.join(root,name)))!==entry.sha256)throw new Error('shared_runtime_drift');
-for(const name of ['clock-evidence-envelope.mjs','linux-clock-evidence.mjs']){
+for(const name of ['clock-evidence-envelope.mjs','linux-clock-evidence.mjs','linux-kernel-sleep.mjs']){
  const runtimePath='runtime/'+name;
  if(!Object.hasOwn(lock.files,'src/'+runtimePath))throw new Error('shared_runtime_drift');
  files.push([runtimePath,await fs.readFile(path.join(root,'src',runtimePath))]);

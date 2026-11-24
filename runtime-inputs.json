@@ -20,12 +20,13 @@
     },
     "src/runtime/linux-clock-evidence.mjs": {
       "source": "src/linux-clock-evidence.mjs",
-      "source_commit": "f4f64effc5d1444bbea0019af7a528429c83eaf2",
-      "sha256": "41c2308a1146495635140b9d37cd1f5491f13f110a0c99c5c0dc5734207af40d"
+      "source_commit": "15cf95f4d38ffbbc382bb13a1b55468095ed355e",
+      "sha256": "bcf8ec97ef18acb4e52168f04ecc25d37a542bf765a72c2cf8e2156a4f3e40e5"
     },
     "src/runtime/auth-clock.mjs": {
       "source": "src/auth-clock.mjs",
-      "sha256": "fc68a5db1710c19c2fd9ec01c67e3858c6e4ea83a8bd5cd07ef09b98ef823242"
+      "source_commit": "15cf95f4d38ffbbc382bb13a1b55468095ed355e",
+      "sha256": "561685ca8d7350949401fa08559334bb0a42be895c9caf0ad68befac83eef55c"
     },
     "src/runtime/auth-clock-value.mjs": {
       "source": "src/auth-clock-value.mjs",
@@ -33,12 +34,13 @@
     },
     "src/runtime/auth-clock-store.mjs": {
       "source": "src/auth-clock-store.mjs",
-      "sha256": "ab71dbedcaa93fd8df5099d0f43e6302716a395b31bb1c2aba047653ba0b93c2"
+      "source_commit": "15cf95f4d38ffbbc382bb13a1b55468095ed355e",
+      "sha256": "181f70d796c7743874a2a69478a835343cf39d9de3550cd28e3f4c86b8e0dd1a"
     },
     "src/runtime/native-clock.mjs": {
       "source": "src/native-clock.mjs",
-      "source_commit": "10b3466ffc1aa8abf3d9a95239755405b3957322",
-      "sha256": "db12f5200105dff2cb73e62e1a9a1eb9a9247ca94a83ab1a60fcb43d52dd5b53"
+      "source_commit": "ae940ba7c46c8f25344fe538d288450b8a593816",
+      "sha256": "feb280b0b64e56ed5f058556a679e98640f4820efaa1572549b7470b3b0b4722"
     },
     "native/clock.cc": {
       "source": "native/clock.cc",
@@ -48,6 +50,11 @@
     "native-inputs.json": {
       "source": "native-inputs.json",
       "sha256": "f86325349a9e9279f75e0d343e0611a5bf835e29975f01d47afe67e0a98d89fa"
+    },
+    "src/runtime/linux-kernel-sleep.mjs": {
+      "source": "src/linux-kernel-sleep.mjs",
+      "source_commit": "ae940ba7c46c8f25344fe538d288450b8a593816",
+      "sha256": "21bd28c957313560460685fd2d197468b9c1ba11b73e8d9af0583ea3dc751888"
     }
   },
   "prebuilt_profiles": {

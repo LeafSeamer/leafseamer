@@ -88,7 +88,7 @@ let reported=false;
 async function report(error){
  if(reported)return;
  reported=true;
- const code=error.code??error.message,safe=error instanceof StorageError||/^(arguments|protected_ingress_(?:profile|platform|address)|linux_clock_evidence_(?:profile|binding|directory)|pairing_(profile|clock)_[a-z_]+|peer_pairing_[a-z_]+|auth_clock_[a-z_]+|bootstrap_[a-z_]+|reference_sampling_[a-z_]+|(?:reference_)?supervisor_[a-z_]+|time_provider_[a-z_]+)$/.test(code);
+ const code=error.code??error.message,safe=error instanceof StorageError||/^(arguments|protected_ingress_(?:profile|platform|address)|linux_clock_evidence_(?:profile|binding|directory)|clock_kernel_sleep_(?:available|unverified)|pairing_(profile|clock)_[a-z_]+|peer_pairing_[a-z_]+|auth_clock_[a-z_]+|bootstrap_[a-z_]+|reference_sampling_[a-z_]+|(?:reference_)?supervisor_[a-z_]+|time_provider_[a-z_]+)$/.test(code);
  await new Promise(resolve=>process.stderr.write(JSON.stringify({error:safe?code:'startup_failed'})+'\n',resolve));
 }
 try{
