@@ -10,8 +10,8 @@
     },
     "src/linux-core-bootstrap.mjs": {
       "source": "src/linux-core-bootstrap.mjs",
-      "source_commit": "df3bd1733639d6640326ff99ab33b0afda2b1e89",
-      "sha256": "d8e5c81837bb665580266a917a51171c0b99c7c2fac6375def392c158f86264a"
+      "source_commit": "ed13b2c2f6534ae84f0d5bb60f8035e40c5f71bf",
+      "sha256": "edd588c591cf83bae77e83550e1bdad204303f376483f6cf4e77cef47c9c7d1e"
     },
     "src/runtime/clock-evidence-envelope.mjs": {
       "source": "src/clock-evidence-envelope.mjs",

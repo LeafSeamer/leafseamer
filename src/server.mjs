@@ -29,7 +29,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(linuxClockEvidenceProfile!==null&&linuxBootstrap===null)throw new Error('linux_clock_evidence_binding');
  const linuxPairing=linuxBootstrap!==null&&linuxClockEvidenceProfile?.authentication===true&&pairing!==null;
  if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,
-  ...(!linuxPairing?[pairing,publicApi,publicationPolicyFactory]:[]),publicationSource,publicationPolicy,armAdmissionPolicy,executionNotificationSink,protectedIngress].some(value=>value!==null))
+  ...(!linuxPairing?[pairing,publicApi,publicationPolicyFactory]:[]),publicationSource,publicationPolicy,armAdmissionPolicy,executionNotificationSink].some(value=>value!==null))
   throw new Error('bootstrap_linux_options');
  if(referenceSamplingAuthority!==null&&(typeof referenceSamplingAuthority!=='function'||supervisedReference===null||referenceTimeProvider!==null))
   throw new Error('reference_sampling_authority');
@@ -38,7 +38,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(publicApi!==null){if(pairing===null)throw new Error('public_api_pairing_required');pairingUuid(publicApi.binding_id);}
  if(protectedIngress!==null){
   if([authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,publicationSource,
-   publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink].some(value=>value!==null))throw new Error('protected_ingress_options');
+   publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink,linuxClockEvidenceProfile].some(value=>value!==null))throw new Error('protected_ingress_options');
   fields(protectedIngress.identity,['service_id','database_instance_id']);
   pairingUuid(protectedIngress.identity.service_id);pairingUuid(protectedIngress.identity.database_instance_id);
   assertProtectedDraftAddress(protectedIngress.host,protectedIngress.port);

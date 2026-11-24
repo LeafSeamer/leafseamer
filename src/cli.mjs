@@ -49,7 +49,7 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
    }
    if(profile&&(!linuxClockEvidenceProfile?.authentication||profile.scope.service_id!==policy.service_id||
     profile.scope.database_instance_id!==policy.database_instance_id))throw new Error('pairing_profile_identity');
-   linuxBootstrap=openLinuxCoreBootstrap(policy,'seamer');
+   linuxBootstrap=openLinuxCoreBootstrap(policy,'seamer',{compose:protectedIngress!==null});
   }
   if(contained){
    const {createSupervisedReference}=await import('./supervised-reference.mjs').catch(error=>{
@@ -97,11 +97,12 @@ async function report(error){
 try{
  const [command,...args]=argv,options={};
  const contained=command==='contained-core-auth';
- const containedLinux=command==='contained-core-linux';
- const ingress=command==='start-protected-ingress';
+ const composeCore=command==='contained-compose-linux';
+ const containedLinux=command==='contained-core-linux'||composeCore;
+ const ingress=command==='start-protected-ingress'||composeCore;
  const importOptions=['--authorization-file','--controller-certificate','--seamer-certificate'];
- if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','contained-core-linux','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
- const allowed=['--data-dir',...(containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
+ if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','contained-core-linux','contained-compose-linux','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
+ const allowed=['--data-dir',...(composeCore?['--bootstrap-policy','--ingress-profile']:containedLinux?['--host','--port','--bootstrap-policy','--clock-evidence-profile','--pairing-profile']:command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
  for(let i=0;i<args.length;i+=2){if(!allowed.includes(args[i])||Object.hasOwn(options,args[i]))throw new Error('arguments');options[args[i]]=args[i+1];}
  if(!options['--data-dir']||!path.isAbsolute(options['--data-dir']))throw new Error('arguments');
  if(command==='init-storage')emit({event:'storage_initialized',...initializeStorage(options['--data-dir']),ready:false});
