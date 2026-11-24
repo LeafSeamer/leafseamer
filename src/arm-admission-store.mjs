@@ -14,7 +14,7 @@ function units(value){
  });
 }
 
-export function armAdmissionStore({db,scope,policy}){
+export function armAdmissionStore({db,scope,policy,artifactSize}){
  const inside=()=>need(db.inTransaction,'run_arm_transaction');
  const select='SELECT operation_id,run_id,definition_id,preflight_id,context_id,request_identity,request_digest,body_jcs,body_digest FROM automation_run_arm';
  const reference=(object_id,digest)=>({kind:'run_arm_operation',scope,object_id,revision:'1',digest});
@@ -47,7 +47,8 @@ export function armAdmissionStore({db,scope,policy}){
  }
  function policyOffer(observation,basis){
   const {admission,...evidence}=basis;
-  const result=policy.inspectInTransaction(structuredClone({scope,observation:{...observation,can_arm:false},basis:evidence}));
+  const result=policy.inspectInTransaction(structuredClone({scope,observation:{...observation,can_arm:false},basis:evidence,
+   ...(policy.needsArtifactSize&&{artifactBytes:artifactSize(observation)})}));
   if(result===null)return null;
   need(keys(result,'capacity,profile_ref,qualification_ref,required'),'run_arm_policy');
   for(const ref of [result.profile_ref,result.qualification_ref])checked('ContentRef',ref);

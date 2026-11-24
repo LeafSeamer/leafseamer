@@ -86,6 +86,7 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
   }
   app=await startSeamer({dataDir:options['--data-dir'],host:options['--host']??'127.0.0.1',port:Number(port),
    supervisedReference,linuxBootstrap,linuxClockEvidenceProfile,referenceSamplingAuthority,onStartupFailure,protectedIngress,...(profile&&{pairing:profile.pairing,publicApi:profile.publicApi,
+    armAdmissionApproval:profile.armAdmissionApproval,
     ...(!containedLinux&&{authenticationProvider:input=>openPairingClock(profile,input,publish,signal)}),
     publicationPolicyFactory:profile.publicationPolicy?input=>openInstalledPublicationPolicy(profile.publicationPolicy,input,{linux:containedLinux}):null})});
   linuxBootstrap?.monitor(stop);

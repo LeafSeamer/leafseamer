@@ -20,8 +20,11 @@ const runApprovalRequests=new Map([
  ['create-approval-context',['ttl_ms','max_unique_requests']],
  ['approve',['run_id','approval']],
  ['inspect',['run_id']],
- ['inspect-arm-prerequisites',['run_id','expected_revision']]
+ ['inspect-arm-prerequisites',['run_id','expected_revision']],
+ ['create-arm-context',['ttl_ms','max_unique_requests']],
+ ['record-arm-preflight',['run_id','expected_revision','context_id']]
 ]);
+const armPreflightOperations=new Set(['create-arm-context','record-arm-preflight']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -60,7 +63,8 @@ function failure(error){
  if(code==='conflict')return [409,'REVISION_CONFLICT'];
  if(['run_proposal_request','run_approval_request','run_approval_targets'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
-  'run_preflight_transition','run_preflight_changed'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_preflight_transition','run_preflight_changed','run_preflight_expired'].includes(code))return [409,'REVISION_CONFLICT'];
+ if(code==='run_preflight_capacity')return [429,'CAPACITY_EXCEEDED'];
  if(['local_authorization_request','local_authorization_operations','draft_duplicate_selection','automation_schema','binding_approval_request','run_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
  return [503,'WORKER_NOT_READY'];
@@ -71,10 +75,10 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,armPreflight=false,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
  if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
-  if(localPermissions||localEventBindings||localRunApprovals||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
+  if(localPermissions||localEventBindings||localRunApprovals||armPreflight||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
    pairedIngress&&(typeof bindingId!=='string'||!receiver||!authorization))fail('protected_ingress_options');
  }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
  if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
@@ -119,6 +123,10 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'approve':return runs.approve(handle,request.run_id,request.approval);
    case 'inspect':return runs.getCurrentApproval(handle,request.run_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
+   case 'create-arm-context':return authorization.createArmRunContext(handle,request);
+   case 'record-arm-preflight':
+    if(typeof request.context_id!=='string')fail('local_authorization_request');
+    return runs.recordArmPreflight(handle,request.run_id,request.expected_revision,request.context_id);
    default:fail('local_authorization_request');
   }
  }
@@ -158,6 +166,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     }else if(body.operation==='inspect')fields(body.request,['principal_id']);
     else if(body.operation!=='replace')fail('local_authorization_request');
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
+   if(req.url===runApprovalPath&&armPreflightOperations.has(body.operation)&&!armPreflight){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

@@ -133,7 +133,11 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    readDependencies(run);
    return {saved,audit:JSON.parse(row[6])};
   }}):null;
- const arm=Number(service.schema_revision)>=14?armAdmissionStore({db,scope,policy:armAdmissionPolicy}):null;
+ const arm=Number(service.schema_revision)>=14?armAdmissionStore({db,scope,policy:armAdmissionPolicy,artifactSize(observation){
+  const run=proposalRun(observation.run_id),published=publications.versionForRunInTransaction(run.definition_id,run.definition_version);
+  need(same(published.result.artifact_ref,observation.artifact_ref)&&same(run.artifact_ref,observation.artifact_ref),'run_dependency_integrity');
+  return Buffer.byteLength(canonical(published.program));
+ }}):null;
  const withExecutionAnchors=Number(service.schema_revision)>=26;
  const withDelays=Number(service.schema_revision)>=27;
  const withActionParameters=Number(service.schema_revision)>=28;
@@ -814,17 +818,22 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    throw error;
   }
  }
- function recordArmPreflight(authentication,id,expectedRevision){
+ function recordArmPreflight(authentication,id,expectedRevision,armContext=null){
+  if(armContext!==null)checked('LifecycleId',armContext);
   return observeArmPrerequisites(authentication,id,expectedRevision,({observation,basis,start},proof)=>{
+   const armProof=armContext===null?null:authorize(authentication,'armRun',proof.definition_id,armContext);
    const now=authority.runApprovalTimeInTransaction();
    const window={service_boot_id:bootId,domain:start.domain,issued_tick_ns:String(now.tick),expires_tick_ns:String(start.tick+preflightWindowNs)};
    need(now.tick>=start.tick,'run_preflight_expired');checkPreflightWindow(window,now);
    const preflight_id=crypto.randomUUID(),preflight={format:'leafseamer.run-arm-preflight/1',preflight_id,window,observation,basis,
-    basis_digest:digest({observation,basis}),reader:{actor:proof.actor,authorization_digest:proof.authorization_digest}};
+    basis_digest:digest({observation,basis}),reader:{actor:proof.actor,authorization_digest:proof.authorization_digest,
+     ...(armProof&&{arm_context_id:armContext})}};
    const text=canonical(preflight),hash=digest(preflight);
    need(Buffer.byteLength(text)<=1048576&&db.prepare('SELECT count(*) FROM automation_run_preflight').pluck().get()<16384,'run_preflight_capacity');
+   if(armProof)authority.assertRunCapacityInTransaction(armProof);
    need(db.prepare('INSERT INTO automation_run_preflight VALUES(?,?,?,?,?)').run(preflight_id,id,bootId,text,hash).changes===1,'run_preflight_storage');
    if(basis.admission)arm.assertPolicy(observation,basis);
+   if(armProof)need(same(armProof,authorize(authentication,'armRun',proof.definition_id,armContext)),'run_authorization_changed');
    need(same(proof,authorize(authentication,'getRun',proof.definition_id,null)),'run_authorization_changed');checkPreflightWindow(window);
    return {preflight_ref:preflightReference(preflight_id,hash),preflight};
   });

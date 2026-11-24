@@ -17,18 +17,21 @@ import {createPeerEventReceiver} from './peer-event-receiver.mjs';
 import {createPeerServiceApprovalReader} from './peer-service-approval.mjs';
 import {createPeerRunApprovalEndorsementReader} from './peer-run-approval-endorsement.mjs';
 import {assertProtectedDraftAddress,startDraftHttp} from './draft-http.mjs';
+import {openInstalledArmAdmissionPolicy} from './installed-arm-admission-policy.mjs';
 import {fields,same} from './runtime/auth-clock-value.mjs';
 import {contractSelection} from './sdk/index.mjs';
 
 export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticationProvider=null,referenceTimeProvider=null,
  supervisedReference=null,linuxBootstrap=null,linuxClockEvidenceProfile=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
- armAdmissionPolicy=null,executionNotificationSink=null,protectedIngress=null}={}){
+ armAdmissionPolicy=null,armAdmissionApproval=null,executionNotificationSink=null,protectedIngress=null}={}){
  if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535)throw new Error('listen_options');
  if(authenticationProvider!==null&&typeof authenticationProvider!=='function')throw new Error('authentication_provider');
  if(referenceTimeProvider!==null&&(typeof referenceTimeProvider!=='function'||pairing===null))throw new Error('receiver_reference_provider');
  if(supervisedReference!==null&&(authenticationProvider===null||pairing===null))throw new Error('reference_supervisor_options');
  if(linuxClockEvidenceProfile!==null&&linuxBootstrap===null)throw new Error('linux_clock_evidence_binding');
  const linuxPairing=linuxBootstrap!==null&&linuxClockEvidenceProfile?.authentication===true&&pairing!==null;
+ if(armAdmissionApproval!==null&&(!linuxPairing||armAdmissionPolicy!==null))
+  throw new Error('pairing_profile_arm_admission_unavailable');
  if(linuxBootstrap!==null&&[authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,
   ...(!linuxPairing?[pairing,publicApi,publicationPolicyFactory]:[]),publicationSource,publicationPolicy,armAdmissionPolicy,executionNotificationSink].some(value=>value!==null))
   throw new Error('bootstrap_linux_options');
@@ -53,10 +56,13 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   pairingUuid(notificationSink.consumerId);
   if(typeof notificationSink.deliver!=='function')throw new Error('execution_notification_sink');
  }
- let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null,linuxRuntime=null;
+ let authentication,installedPolicy,installedArmPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null,linuxRuntime=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
- const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy,expectedIdentity:protectedIngress?.identity??null});
+ const armPolicy=armAdmissionApproval===null?armAdmissionPolicy:{needsArtifactSize:true,inspectInTransaction(input){
+  linuxRuntime.assertLive();return installedArmPolicy.inspectInTransaction(input);
+ }};
+ const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy:armPolicy,expectedIdentity:protectedIngress?.identity??null});
  let executionNotifications=null,executionNotificationDelivery=null;
  const closeFailedStartup=async error=>{
   // 监督管道关闭后宿主可立即回收核心，先交付已分类的启动诊断。
@@ -87,6 +93,10 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   authentication=startAuthenticationClock(source,storage.authenticationClock,provider??null,
    {waitForInitialEvidence:linuxAuthentication,renewableHealth:linuxAuthentication});
   if(linuxPairing)await waitForLinuxAuthentication(authentication,linuxRuntime.signal);
+  if(armAdmissionApproval!==null){
+   fields(armAdmissionApproval,['approval_file','approval_sha256']);
+   installedArmPolicy=openInstalledArmAdmissionPolicy(armAdmissionApproval,{identity,clock:authentication});
+  }
   const openSampling=referenceSamplingAuthority===null?null:async input=>{
    const authority=await referenceSamplingAuthority({identity,serviceBootId:storage.serviceBootId,source,supervisedDomain});
    return storage.openReferenceSampling({...input,authority});
@@ -184,7 +194,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(Number(storage.identity.schema_revision)>=3){bindingReceiver=createPeerBindingReceiver({service:storage.identity,pairings:peerApi,clock:authentication,transport:peerTransport});bindingApprovals=storage.bindBindingApprovals({receiver:bindingReceiver,eventReceiver});}
   if(publicApi!==null)publicTransport=await startDraftHttp({host:publicApi.host??'127.0.0.1',port:publicApi.port??0,cert:publicApi.cert,key:publicApi.key,bindingId:publicApi.binding_id,
    allowedOrigins:publicApi.allowedOrigins??[],localPermissions:publicApi.localPermissions===true,localEventBindings:publicApi.localEventBindings===true,
-   localRunApprovals:publicApi.localRunApprovals===true,sourceSubscriptions,onFailure:publicApi.onFailure??null,
+   localRunApprovals:publicApi.localRunApprovals===true,armPreflight:installedArmPolicy!==undefined,sourceSubscriptions,onFailure:publicApi.onFailure??null,
    service:storage.identity,bootId:storage.serviceBootId,receiver:identityReceiver,authorization,bindingApprovals,drafts:storage.drafts,publications:storage.publications,runs:storage.runs});
   if(storage.runs?.scanArmPreparation)armPreparationDelivery=startOutboxDelivery({scan:storage.runs.scanArmPreparation,
    async deliver(item){return (await storage.runs.deliverArmPreparation(item)).state;},pageSize:4});

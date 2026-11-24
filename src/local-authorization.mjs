@@ -104,7 +104,7 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   }
   return {...proof,authentication_evidence};
  }
- function contextCharges(contextId){
+ function contextCharges(contextId,operation){
   const draft=db.prepare('SELECT count(*) FROM local_context_request WHERE context_id=?').pluck().get(contextId);
   if(Number(service.schema_revision)<3)return draft;
   const approvals=db.prepare("SELECT count(*) FROM binding_approval_revision WHERE CASE state WHEN 'approved' THEN json_extract(body_jcs,'$.authorization.context_id') ELSE json_extract(body_jcs,'$.revocation.context_id') END=?").pluck().get(contextId);
@@ -113,12 +113,14 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   const runApprovals=Number(service.schema_revision)>=7?db.prepare('SELECT count(*) FROM automation_run_approval WHERE context_id=?').pluck().get(contextId):0;
   const revocations=Number(service.schema_revision)>=8?db.prepare('SELECT count(*) FROM automation_run_approval_revocation WHERE context_id=?').pluck().get(contextId):0;
   const eventApprovals=Number(service.schema_revision)>=11?db.prepare('SELECT count(*) FROM event_binding_approval_revision WHERE context_id=?').pluck().get(contextId):0;
+  const preflights=operation===armOperation&&Number(service.schema_revision)>=13?
+   db.prepare("SELECT count(*) FROM automation_run_preflight WHERE json_extract(body_jcs,'$.reader.arm_context_id')=?").pluck().get(contextId):0;
   const arms=Number(service.schema_revision)>=14?db.prepare('SELECT count(*) FROM automation_run_arm WHERE context_id=?').pluck().get(contextId):0;
-  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+arms;
+  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms;
  }
  function assertContextCapacity(proof){
   inside();const row=db.prepare('SELECT body_jcs,digest FROM local_request_context WHERE context_id=?').raw().get(proof.context_id);need(row,'context');
-  need(contextCharges(proof.context_id)<decode(row[0],row[1]).context.max_unique_requests,'context_capacity');
+  need(contextCharges(proof.context_id,proof.operation_id)<decode(row[0],row[1]).context.max_unique_requests,'context_capacity');
  }
  function bindingProof(handle,definitionId,write=true,requestContext=null){
   inside();need(uuid(definitionId),'object');const found=write?manager(handle):authorized(handle,'auth.read');

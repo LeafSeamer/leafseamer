@@ -37,7 +37,8 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
   const readFile=linux?readLinuxProtectedFile:readLocalFile;
   const value=json(readFile(file,65536));
   fields(value,['format','scope','local','controller',...(linux?[]:['clock']),'first_pairing_authorization_id',
-   ...(Object.hasOwn(value,'public_api')?['public_api']:[]),...(Object.hasOwn(value,'publication_policy')?['publication_policy']:[])]);
+   ...(Object.hasOwn(value,'public_api')?['public_api']:[]),...(Object.hasOwn(value,'publication_policy')?['publication_policy']:[]),
+   ...(linux&&Object.hasOwn(value,'arm_admission_policy')?['arm_admission_policy']:[])]);
   need(value.format==='leafseamer.seamer-pairing-profile/'+(linux?'2':'1'),'pairing_profile_format');
   const {scope,local,controller,clock,first_pairing_authorization_id:authorizationId}=value;
   fields(scope,['service_id','database_instance_id']);Object.values(scope).forEach(pairingUuid);
@@ -73,16 +74,17 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
     localRunApprovals:api.local_run_approvals===true,
     cert:readFile(api.certificate_file,65536),key:readFile(api.private_key_file,65536)};
   }
-  const publicationPolicy=value.publication_policy??null;
-  if(Object.hasOwn(value,'publication_policy')){
-   fields(publicationPolicy,['approval_file','approval_sha256']);
-   need(typeof publicationPolicy.approval_file==='string'&&path.isAbsolute(publicationPolicy.approval_file)&&
-    hash(publicationPolicy.approval_sha256),'pairing_profile_publication_policy');
+  for(const key of ['publication_policy','arm_admission_policy']){
+   if(!Object.hasOwn(value,key))continue;
+   const policy=value[key];
+   fields(policy,['approval_file','approval_sha256']);
+   need(typeof policy.approval_file==='string'&&path.isAbsolute(policy.approval_file)&&hash(policy.approval_sha256),'pairing_profile_'+key);
   }
   const {service_id,issuer_id,issuer_epoch}=ids;
   const key=linux?null:crypto.createPublicKey(readLocalFile(clock.public_key_file,16384));
   need(linux||key.asymmetricKeyType==='ed25519','pairing_profile_signer');
-  return {scope,authorizationId,publicApi,publicationPolicy,clock:linux?null:{file:clock.evidence_file,policyDigest:clock.policy_digest,key},
+  return {scope,authorizationId,publicApi,publicationPolicy:value.publication_policy??null,armAdmissionApproval:value.arm_admission_policy??null,
+   clock:linux?null:{file:clock.evidence_file,policyDigest:clock.policy_digest,key},
    pairing:{host:local.host,port:local.port,network,serverName:local.server_name??local.host,credential_id:local.credential_id,issuer:{service_id,issuer_id,issuer_epoch},
     cert:readFile(local.certificate_file,65536),key:readFile(local.private_key_file,65536),ca:local.ca_files.map(file=>readFile(file,65536))},
    peer:{identity:controller.identity,origin:controller.origin,server_name:controller.server_name,trust_bundle_digest:controller.trust_bundle_digest,
