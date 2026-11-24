@@ -57,7 +57,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(typeof notificationSink.deliver!=='function')throw new Error('execution_notification_sink');
  }
  let authentication,installedPolicy,installedArmPolicy,referenceProvider=null,collectorBinding=null,sampling=null,clockEvidence=null,linuxRuntime=null;
- let linuxCollector=null,linuxReference=null,linuxBinding=null;
+ let linuxCollector=null,linuxReference=null,linuxBinding=null,installedCapture=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
  const armPolicy=armAdmissionApproval===null?armAdmissionPolicy:{needsArtifactSize:true,inspectInTransaction(input){
@@ -68,7 +68,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  const closeFailedStartup=async error=>{
   // 监督管道关闭后宿主可立即回收核心，先交付已分类的启动诊断。
   try{await onStartupFailure?.(error);}catch{/* 不用诊断写入错误替换原启动失败。 */}
-  try{await supervisedReference?.close();linuxCollector?.close();linuxReference?.socket.destroy();linuxBootstrap?.close();}
+  try{await Promise.allSettled([supervisedReference?.close(),sampling?.close()]);linuxCollector?.close();linuxReference?.socket.destroy();linuxBootstrap?.close();}
   finally{try{authentication?.stop();}finally{storage.close();}}
  };
  try{
@@ -80,6 +80,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    const accepted=await linuxBootstrap.accept({identity,source});
    linuxRuntime=accepted;
    linuxReference=accepted.referenceProvider??null;
+   installedCapture=accepted.referenceCapture??null;
+   if(installedCapture&&(!linuxReference||!linuxAuthentication))throw new Error('reference_sampling_authority');
    if(linuxReference){
     const {sealTimeProviderRuntime}=await import('./time-provider-link.mjs');
     linuxBinding=sealTimeProviderRuntime({identity,serviceBootId:storage.serviceBootId,core:accepted.binding,provider:linuxReference.provider});
@@ -101,7 +103,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    await authenticationProvider?.({scope:storage.authenticationClock.scope,identity,source,...(supervisedDomain&&{supervisedDomain})});
   authentication=startAuthenticationClock(source,storage.authenticationClock,provider??null,
    {waitForInitialEvidence:linuxAuthentication,renewableHealth:linuxAuthentication});
-  if(linuxPairing)await waitForLinuxAuthentication(authentication,linuxRuntime.signal);
+  if(linuxPairing||installedCapture)await waitForLinuxAuthentication(authentication,linuxRuntime.signal);
   if(linuxReference){
    const {openTimeProviderLink}=await import('./time-provider-link.mjs');
    linuxCollector=await openTimeProviderLink(linuxBinding,{connection:linuxReference.socket,assertCurrent:linuxReference.assertCurrent,
@@ -110,6 +112,9 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    linuxCollector.assertCurrent();
    collectorBinding=Object.freeze({runtime_id:linuxBinding.runtimeId,runtime_digest:linuxBinding.digest,
     clock_domain_ref:linuxRuntime.binding.receipt.domain_ref,provider_pid:linuxReference.provider.process_observation.provider_pid});
+   if(installedCapture)sampling=await storage.openReferenceSampling({binding:linuxBinding,collector:linuxCollector,authentication,authority:installedCapture,
+    archiveOnly:true,supervision:{assertCurrent:linuxReference.assertCurrent,observeTimeProviderRetirement:()=>null,
+     assertTimeProviderRetirement(){throw new Error('time_provider_poll_retirement_unavailable');}}});
   }
   if(armAdmissionApproval!==null){
    fields(armAdmissionApproval,['approval_file','approval_sha256']);
@@ -121,7 +126,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   };
   const collectorRuntime=await supervisedReference?.connect({identity,serviceBootId:storage.serviceBootId,authentication,adopt:storage.adoptReferenceRuntime,openSampling});
   collectorBinding=collectorRuntime?.binding??collectorBinding;
-  sampling=collectorRuntime?.sampling??null;
+  sampling=collectorRuntime?.sampling??sampling;
   referenceProvider=sampling?.receiverReference??null;
   if(referenceTimeProvider!==null){
    // 只从受信本机装配取得参考原件。认证时钟提供同域单调时刻，不提供事件 UTC 界。
@@ -273,7 +278,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    }:null,runApprovalProtectionStatus:()=>runProtectionDelivery?{...runProtectionDelivery.status(),binding_revocation_scan_failed:bindingRevocationScanFailures}:null,
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
   close(){return stopping??=(async()=>{sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
-   const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close()]);
+   const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close(),installedCapture&&sampling?.close()]);
    try{linuxCollector?.close();linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}
  });

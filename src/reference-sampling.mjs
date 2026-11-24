@@ -7,18 +7,20 @@ import {canonical} from './runtime/auth-clock-value.mjs';
 
 const require=(condition,code)=>{if(!condition)throw new Error(code);};
 
-export function openReferenceSampling({db,identity,bootId,binding,supervision,collector,authentication,authority}){
- const {sourceSlot,limits,readSource,readEndpoint,captureProtection,referenceAuthority}=authority;
- require(typeof readEndpoint==='function'&&typeof referenceAuthority?.readBundleOriginals==='function','reference_sampling_authority');
+export function openReferenceSampling({db,identity,bootId,binding,supervision,collector,authentication,authority,archiveOnly=false}){
+ const {limits,readSource,readEndpoint,captureProtection,referenceAuthority}=authority;
+ const sourceSlot=archiveOnly?authority.schedule.sourceSlots[0]:authority.sourceSlot;
+ require(typeof readEndpoint==='function'&&(archiveOnly?referenceAuthority===undefined:typeof referenceAuthority?.readBundleOriginals==='function'),
+  'reference_sampling_authority');
  let closing;
  const assertCurrent=()=>{
   require(!closing&&db.open,'reference_sampling_closed');
   supervision.assertCurrent();collector.assertCurrent();
  };
  assertCurrent();
- const polls=timeProviderPollStore(db,bootId,binding,{limits,readSource,readAuthentication:authentication.referenceTimeSample,assertCurrent,
+ const polls=timeProviderPollStore(db,bootId,binding,{limits,readSource:slot=>readSource(slot,authentication),readAuthentication:authentication.referenceTimeSample,assertCurrent,
   observeRetirement:supervision.observeTimeProviderRetirement,assertRetirement:supervision.assertTimeProviderRetirement},true,true,true);
- const anchors=referenceTimeAnchorStore(db,bootId,binding,{...referenceAuthority,sourceSlot,readContext:polls.referenceContext});
+ const anchors=archiveOnly?null:referenceTimeAnchorStore(db,bootId,binding,{...referenceAuthority,sourceSlot,readContext:polls.referenceContext});
  const archive=timeProviderCaptureStore(db,identity,captureProtection,anchors);
  const scheduler=referenceTimeScheduler({sourceSlots:[sourceSlot]},{plan:polls.schedulePlan,recover:polls.recover,
   collect(slot,pollId,facts){
@@ -36,6 +38,6 @@ export function openReferenceSampling({db,identity,bootId,binding,supervision,co
      release:(receipt,acknowledgement)=>archive.release({receipt,acknowledgement,reservation,assertCurrent})};
    });
   }});
- return Object.freeze({receiverReference:anchors.receiverReference,current:anchors.current,status:scheduler.status,start:scheduler.start,
+ return Object.freeze({receiverReference:anchors?.receiverReference??null,current:anchors?.current??null,status:scheduler.status,start:scheduler.start,
   close(){return closing??=(async()=>{const drained=scheduler.close();collector.close();await drained;})();}});
 }

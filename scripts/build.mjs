@@ -85,7 +85,7 @@ const overrides=controllerManifestDigest===pairingLock.manifest_sha256?{}:pairin
 if(!overrides)throw new Error('pairing_runtime_drift');
 const supervisionNames=['core-bootstrap.mjs','supervisor-control.mjs','authority-source-window.mjs','time-provider-link.mjs','runtime/canonicalize.mjs',
  'time-provider-polls.mjs','time-provider-capture.mjs','reference-time-anchor.mjs','reference-time-bundle.mjs','reference-time-scheduler.mjs'];
-const {'linux-reference-provider.mjs':linuxReferencePin,...serviceOverrides}=overrides;
+const {'linux-reference-provider.mjs':linuxReferencePin,'linux-reference-capture.mjs':linuxCapturePin,...serviceOverrides}=overrides;
 const supervisionOverrides=Object.fromEntries(Object.entries(serviceOverrides).filter(([name])=>supervisionNames.includes(name)));
 const pairingOverrides=Object.fromEntries(Object.entries(serviceOverrides).filter(([name])=>!supervisionNames.includes(name)));
 if(Object.keys(pairingOverrides).some(name=>!Object.hasOwn(pairingLock.artifacts,name)&&
@@ -114,11 +114,13 @@ if(supervisionMatches){
  files.push(['auth-clock-value.mjs',Buffer.from("export {canonical,digest,same} from './runtime/auth-clock-value.mjs';\n")]);
 }
 if(linuxBootstrap&&!supervisionMatches)files.push(['runtime/canonicalize.mjs',Buffer.from("export {default} from 'canonicalize';\n")]);
-if(linuxBootstrap&&linuxReferencePin!==undefined){
- const name='linux-reference-provider.mjs',bytes=await fs.readFile(new URL('dist/'+name,controllerRoot));
- if(!supervisionMatches||controllerManifest.artifacts[name]!==linuxReferencePin||hash(bytes)!==linuxReferencePin)
-  throw new Error('linux_reference_runtime_drift');
- files.push([name,bytes]);
+if(linuxBootstrap){
+ for(const [name,expected] of [['linux-reference-provider.mjs',linuxReferencePin],['linux-reference-capture.mjs',linuxCapturePin]]){
+  if(expected===undefined)continue;
+  const bytes=await fs.readFile(new URL('dist/'+name,controllerRoot));
+  if(!supervisionMatches||controllerManifest.artifacts[name]!==expected||hash(bytes)!==expected)throw new Error('linux_reference_runtime_drift');
+  files.push([name,bytes]);
+ }
 }
 const controllerLicense=await fs.readFile(new URL('LICENSE',controllerRoot));if(hash(controllerLicense)!==pairingLock.license_sha256)throw new Error('pairing_license_drift');
 files.push(['runtime/PAIRING-LICENSE',controllerLicense]);

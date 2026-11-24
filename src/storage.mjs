@@ -239,12 +239,12 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
      assertCurrent();
     }).immediate();
    },
-   async openReferenceSampling({binding,supervision,collector,authentication,authority}){
+   async openReferenceSampling({binding,supervision,collector,authentication,authority,archiveOnly=false}){
     need(!closed&&Number(value.schema_revision)>=21,'reference_sampling_schema');
     const {openReferenceSampling}=await import('./reference-sampling.mjs');
     need(!closed&&db.prepare('SELECT body_jcs FROM time_provider_runtime_binding WHERE service_boot_id=? AND runtime_id=? AND body_digest=?')
      .pluck().get(bootId,binding.runtimeId,binding.digest)===binding.text,'reference_supervisor_integrity');
-    return openReferenceSampling({db,identity:value,bootId,binding,supervision,collector,authentication,authority});
+    return openReferenceSampling({db,identity:value,bootId,binding,supervision,collector,authentication,authority,archiveOnly});
    },
    identityWatermarks:peerIdentityWatermarks({db,service:value,bootId,isOpen:()=>!closed}),
    bindSessionDenials({issuer}){need(!closed,'closed');return receivedSessionDenials({db,service:value,bootId,isOpen:()=>!closed,pairings,issuer});},
