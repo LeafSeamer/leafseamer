@@ -1,5 +1,7 @@
 import crypto from 'node:crypto';
 import https from 'node:https';
+import {isIP} from 'node:net';
+import {networkInterfaces} from 'node:os';
 import {TLSSocket} from 'node:tls';
 import {createHttpAdapter} from './sdk/http.mjs';
 import {contractSelection as selection} from './sdk/index.mjs';
@@ -45,14 +47,24 @@ function failure(error){
  if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
  return [503,'WORKER_NOT_READY'];
 }
+export function assertProtectedDraftAddress(host,port){
+ if(process.platform!=='linux')fail('protected_ingress_platform');
+ if(!isIP(host)||!Object.values(networkInterfaces()).flat().some(iface=>iface.address===host)||
+  !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
+}
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,onFailure=null}){
- if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string'||!Array.isArray(allowedOrigins)||allowedOrigins.length>8)throw new Error('draft_http_configuration');
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,onFailure=null,protectedIngress=false}){
+ if(protectedIngress){
+  assertProtectedDraftAddress(host,port);
+  if(bindingId!==undefined||receiver||authorization||localPermissions||localEventBindings)fail('protected_ingress_options');
+ }else if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535||typeof bindingId!=='string')fail('draft_http_configuration');
+ if(!Array.isArray(allowedOrigins)||allowedOrigins.length>8)fail('draft_http_configuration');
  if(localEventBindings&&typeof bindingApprovals?.approveEventCurrent!=='function')throw new Error('pairing_profile_event_bindings_unavailable');
  for(const origin of allowedOrigins){const url=new URL(origin);if(url.protocol!=='https:'||url.origin!==origin)throw new Error('draft_http_origin');}
  const csrfKey=crypto.randomBytes(32);
  const csrfFor=(context,token,origin)=>crypto.createHmac('sha256',csrfKey).update(JSON.stringify([service.service_id,bootId,context,token,origin])).digest('base64url');
- const adapter=createHttpAdapter(selection),origins=new Set(allowedOrigins);let origin,site,closed=false,pending=0,reserved=0;
+ const adapter=createHttpAdapter(selection),origins=new Set(allowedOrigins);let origin,site,authority,closed=false,pending=0,reserved=0;
+ const validHost=value=>value===site.host||value===authority;
  const observe=error=>{try{onFailure?.({name:error?.name??'Error',code:error?.reason??error?.code??'http_internal'});}catch{}};
  const empty=(res,status)=>{if(!res.headersSent&&!res.destroyed){res.writeHead(status,{'Cache-Control':'no-store','Content-Length':'0',Connection:'close'});res.end();}};
  async function reply(res,request,status,data=null,code=null,beforeSend=()=>{},extraHeaders=[]){
@@ -85,7 +97,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
   };
   if(req.method!=='POST'){empty(res,405);return;}
   if(!(req.socket instanceof TLSSocket)||req.socket.getProtocol()!=='TLSv1.3'||req.socket.remoteAddress!==host||
-   req.headers.host!==site.host||req.headers.origin!==undefined||req.headers.cookie!==undefined||
+   !validHost(req.headers.host)||req.headers.origin!==undefined||req.headers.cookie!==undefined||
    req.headers.forwarded!==undefined||Object.keys(req.headers).some(key=>key.startsWith('x-forwarded-'))){empty(res,403);return;}
   const token=bearer(req);
   if(!token){replyLocal(401,{error:'AUTH_REQUIRED'});return;}
@@ -121,13 +133,14 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
  }
  async function serve(req,res){
   let request;try{request=adapter.prepareRequest('seamer',req.method,req.url,pairs(req.rawHeaders));}catch{empty(res,400);return;}
-  if(!supported.has(request.operation_id)||!runs&&['createRun','getRun'].includes(request.operation_id)){empty(res,404);return;}
-  if(!(req.socket instanceof TLSSocket)||req.socket.getProtocol()!=='TLSv1.3'||req.headers.host!==site.host||req.headers.cookie!==undefined){empty(res,403);return;}
+  if(!supported.has(request.operation_id)||!protectedIngress&&!runs&&['createRun','getRun'].includes(request.operation_id)){empty(res,404);return;}
+  if(!(req.socket instanceof TLSSocket)||req.socket.getProtocol()!=='TLSv1.3'||!validHost(req.headers.host)||req.headers.cookie!==undefined){empty(res,403);return;}
   if(req.headers.origin!==undefined&&!origins.has(req.headers.origin)){await reply(res,request,403,null,'PERMISSION_DENIED');return;}
   if(req.headers.origin){res.setHeader('Access-Control-Allow-Origin',req.headers.origin);res.setHeader('Vary','Origin');
    res.setHeader('Access-Control-Expose-Headers','X-LeafSeamer-Contract, X-LeafSeamer-Contract-Digest, X-CSRF-Token');}
   const token=bearer(req);
   if(!token){await reply(res,request,401,null,'AUTH_REQUIRED');return;}
+  if(protectedIngress){await reply(res,request,503,null,'WORKER_NOT_READY');return;}
   const length=Number(req.headers['content-length']??0);
   if(req.headers['transfer-encoding']!==undefined||!Number.isSafeInteger(length)||length<0){empty(res,400);return;}
   if(length>maximumBody){await reply(res,request,413,null,'PAYLOAD_TOO_LARGE');return;}
@@ -212,7 +225,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
   if(req.method==='OPTIONS'){
    const method=req.headers['access-control-request-method'],headers=(req.headers['access-control-request-headers']??'').toLowerCase().split(',').map(x=>x.trim()).filter(Boolean);
    let allowed=false;try{allowed=supported.has(adapter.prepareRequest('seamer',method,req.url,[...(['GET','HEAD'].includes(method)?[]:[['content-type','application/json']]),['x-leafseamer-contract',selection.contract_id],['x-leafseamer-contract-digest',selection.contract_digest]]).operation_id);}catch{}
-   if(!allowed||req.headers.host!==site.host||!origins.has(req.headers.origin)||headers.some(h=>!['authorization','content-type','x-csrf-token','x-leafseamer-contract','x-leafseamer-contract-digest'].includes(h))){empty(res,403);return;}
+   if(!allowed||!validHost(req.headers.host)||!origins.has(req.headers.origin)||headers.some(h=>!['authorization','content-type','x-csrf-token','x-leafseamer-contract','x-leafseamer-contract-digest'].includes(h))){empty(res,403);return;}
    res.writeHead(204,{'Access-Control-Allow-Origin':req.headers.origin,'Access-Control-Allow-Methods':method,'Access-Control-Allow-Headers':headers.join(', '),Vary:'Origin','Cache-Control':'no-store'});res.end();return;
   }
   void serve(req,res).catch(error=>{observe(error);empty(res,503);});
@@ -220,6 +233,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
  server.maxConnections=32;server.maxRequestsPerSocket=1;server.on('clientError',(_error,socket)=>socket.destroy());
  try{await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,host,resolve);});}
  catch(error){server.close();throw error;}
- origin='https://'+(host==='::1'?'[::1]':host)+':'+server.address().port;site=new URL(origin);origins.add(origin);let stopping;
+ authority=(isIP(host)===6?'['+host+']':host)+':'+server.address().port;
+ origin='https://'+authority;site=new URL(origin);if(!protectedIngress)origins.add(origin);let stopping;
  return Object.freeze({origin,close(){return stopping??=(async()=>{closed=true;await new Promise((resolve,reject)=>{server.close(error=>error?reject(error):resolve());server.closeAllConnections();});})();}});
 }

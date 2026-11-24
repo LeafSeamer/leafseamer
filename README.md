@@ -157,6 +157,16 @@ Seamer 的时钟包络可由 Controller 安装包中的 `dist/clock-evidence.mjs
 
 可信装配可为 `startSeamer` 提供 `publicApi: {cert, key, binding_id, host, port, allowedOrigins}`，CLI 通过配对配置的 `public_api` 启用同一 HTTPS 入口，并在 `listening` 事件返回 `public_origin`。首次引导时 `binding_id` 须匹配授权中的 Seamer 绑定。公开 TLS 和内部双向 TLS 分别监听，证书由装配方提供。监听失败统一关闭已启动的端口并释放文件库。
 
+### Linux 保护态 HTTPS 启动
+
+先初始化并显式迁移 Seamer 数据库，再运行安装包中的入口。
+
+`node --disallow-code-generation-from-strings dist/cli.mjs start-protected-ingress --data-dir /srv/leafseamer/seamer --ingress-profile /etc/leafseamer/seamer-ingress.json`
+
+本机受保护的 JSON 配置采用 `format` 值 `leafseamer.seamer-protected-ingress/1`，包含 `service_id`、`database_instance_id`、`address`、`port`、`origin`、`certificate_file` 和 `private_key_file`。IP 必须匹配当前网络命名空间内分配的接口地址，端口固定。证书和私钥使用绝对路径，由部署者保护。证书覆盖 Nginx 校验的上游名称，`origin` 使用实际管理 HTTPS 源。
+
+启动记录写入前校验服务和数据库身份。公开监听复用现有 API 的 TLS、Host 与 Origin 检查，缺少凭据返回 401，带格式有效的凭据返回 503。健康口继续绑定回环。实际配对和授权操作经 `--pairing-profile` 对应的受信启动路径启用。
+
 启用 `public_api.local_permissions` 后，可在本机以 `POST /auth/local-permissions/v1` 管理本地权限。使用发给该 Seamer 的人员 Bearer 令牌和 `Content-Type: application/json`。此路由接受本机直连 HTTPS，请求不携带 Cookie、Origin 或代理头。正文使用规范 JSON `{operation, request}`。读当前授权时用 `inspect` 和 `request: {principal_id}`。写授权时用 `replace`，提供 `request_id`、`principal_id`、`principal_kind`、`expected_revision`、`permissions`、`definition_scope`、`not_before_ns` 和 `expires_ns`。写入要求已有本地管理权限、当前签发方权限和近期认证。
 
 首次配对只登记 `auth.read` 和 `auth.manage`。创建草稿前，由 Controller 为该人员配置定向权限上限，再由 Seamer 管理员显式批准 `request.create` 和 `definition.edit` 等业务权限。读取草稿需要 `definition.read`。

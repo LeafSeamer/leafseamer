@@ -15,10 +15,10 @@ const hash=value=>typeof value==='string'&&/^sha256:[a-f0-9]{64}$/.test(value);
 const loopback=value=>['127.0.0.1','::1'].includes(value);
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
 
-export function readLocalFile(file,limit){
+export function readLocalFile(file,limit,{noFollow=false}={}){
  need(typeof file==='string'&&path.isAbsolute(file),'arguments');
- need(fs.statSync(file).isFile(),'local_file_type');
- const handle=fs.openSync(file,'r');
+ if(!noFollow)need(fs.statSync(file).isFile(),'local_file_type');
+ const handle=fs.openSync(file,noFollow?fs.constants.O_RDONLY|fs.constants.O_NOFOLLOW|fs.constants.O_NONBLOCK:'r');
  try{
   const stat=fs.fstatSync(handle);
   need(stat.isFile()&&stat.size>0&&stat.size<=limit,'local_file_size');

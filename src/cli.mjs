@@ -3,12 +3,13 @@ import path from 'node:path';
 import {importFirstPairingAuthorization,initializeStorage,migrateStorage,openStorage,StorageError} from './storage.mjs';
 import {startSeamer} from './server.mjs';
 import {completeLocalFirstPairing,openInstalledPublicationPolicy,openPairingClock,readLocalFile,readTrustedPairingProfile} from './trusted-pairing-profile.mjs';
+import {readProtectedIngressProfile} from './protected-ingress-profile.mjs';
 const emit=value=>process.stdout.write(JSON.stringify(value)+'\n');
 function readFirstPairingFile(file,limit){
  try{return readLocalFile(file,limit);}catch{throw new StorageError('first_pairing_input_file');}
 }
 const supervisorOptions=['--bootstrap-policy','--supervisor-pipe','--supervisor-channel','--time-provider-intent'];
-async function serve(options,contained,referenceSamplingAuthority,onStartupFailure){
+async function serve(options,contained,referenceSamplingAuthority,onStartupFailure,protectedIngress){
  const port=options['--port']??'0',file=options['--pairing-profile'];
  if(!/^(0|[1-9][0-9]{0,4})$/.test(port)||file!==undefined&&!path.isAbsolute(file))throw new Error('arguments');
  const profile=file===undefined?null:readTrustedPairingProfile(file),stopRequest=new AbortController(),{signal}=stopRequest;
@@ -47,7 +48,7 @@ async function serve(options,contained,referenceSamplingAuthority,onStartupFailu
    }});
   }
   app=await startSeamer({dataDir:options['--data-dir'],host:options['--host']??'127.0.0.1',port:Number(port),
-   supervisedReference,referenceSamplingAuthority,onStartupFailure,...(profile&&{pairing:profile.pairing,publicApi:profile.publicApi,authenticationProvider:input=>openPairingClock(profile,input,publish,signal),
+   supervisedReference,referenceSamplingAuthority,onStartupFailure,protectedIngress,...(profile&&{pairing:profile.pairing,publicApi:profile.publicApi,authenticationProvider:input=>openPairingClock(profile,input,publish,signal),
     publicationPolicyFactory:profile.publicationPolicy?input=>openInstalledPublicationPolicy(profile.publicationPolicy,input):null})});
   if(signal.aborted){await stop();return;}
   if(profile){
@@ -72,15 +73,16 @@ let reported=false;
 async function report(error){
  if(reported)return;
  reported=true;
- const code=error.code??error.message,safe=error instanceof StorageError||/^(arguments|pairing_(profile|clock)_[a-z_]+|peer_pairing_[a-z_]+|auth_clock_[a-z_]+|bootstrap_[a-z_]+|reference_sampling_[a-z_]+|(?:reference_)?supervisor_[a-z_]+|time_provider_[a-z_]+)$/.test(code);
+ const code=error.code??error.message,safe=error instanceof StorageError||/^(arguments|protected_ingress_(?:profile|platform|address)|pairing_(profile|clock)_[a-z_]+|peer_pairing_[a-z_]+|auth_clock_[a-z_]+|bootstrap_[a-z_]+|reference_sampling_[a-z_]+|(?:reference_)?supervisor_[a-z_]+|time_provider_[a-z_]+)$/.test(code);
  await new Promise(resolve=>process.stderr.write(JSON.stringify({error:safe?code:'startup_failed'})+'\n',resolve));
 }
 try{
  const [command,...args]=argv,options={};
  const contained=command==='contained-core-auth';
+ const ingress=command==='start-protected-ingress';
  const importOptions=['--authorization-file','--controller-certificate','--seamer-certificate'];
- if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth'].includes(command)||args.length%2)throw new Error('arguments');
- const allowed=['--data-dir',...(command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
+ if(!['init-storage','migrate-storage','identity-status','import-first-pairing','start','contained-core-auth','start-protected-ingress'].includes(command)||args.length%2)throw new Error('arguments');
+ const allowed=['--data-dir',...(command==='start'||contained?['--host','--port','--pairing-profile',...(contained?supervisorOptions:[])]:ingress?['--ingress-profile']:command==='migrate-storage'?['--to-revision']:command==='import-first-pairing'?importOptions:[])];
  for(let i=0;i<args.length;i+=2){if(!allowed.includes(args[i])||Object.hasOwn(options,args[i]))throw new Error('arguments');options[args[i]]=args[i+1];}
  if(!options['--data-dir']||!path.isAbsolute(options['--data-dir']))throw new Error('arguments');
  if(command==='init-storage')emit({event:'storage_initialized',...initializeStorage(options['--data-dir']),ready:false});
@@ -92,7 +94,8 @@ try{
    controllerCertificate:readFirstPairingFile(options['--controller-certificate'],65536),seamerCertificate:readFirstPairingFile(options['--seamer-certificate'],65536)});
   emit({event:'first_pairing_imported',...result,ready:false});
  }
- else return await serve(options,contained,referenceSamplingAuthority,contained?report:null);
+ else return await serve(options,contained,referenceSamplingAuthority,contained?report:null,
+  ingress?readProtectedIngressProfile(options['--ingress-profile']):null);
 }catch(error){
  process.exitCode=1;await report(error);
 }

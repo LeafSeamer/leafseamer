@@ -178,11 +178,12 @@ export function importFirstPairingAuthorization(directory,input){
   throw new StorageError(code);
  }finally{db?.close();}
 }
-export function openStorage(directory,{draftAuthority=null,publicationSource=null,publicationPolicy=null,armAdmissionPolicy=null}={}){
+export function openStorage(directory,{draftAuthority=null,publicationSource=null,publicationPolicy=null,armAdmissionPolicy=null,expectedIdentity=null}={}){
  need(publicationPolicy===null||publicationSource===null&&typeof publicationPolicy.assertCurrentInTransaction==='function','publication_source_configuration');
  need(armAdmissionPolicy===null||typeof armAdmissionPolicy.inspectInTransaction==='function','run_arm_policy_configuration');
  let db;try{
   db=open(filename(directory));const value=validate(db),bootId=crypto.randomUUID();let closed=false,pairings=null,bindingApprovals=null,snapshotIngest=null,sourceTransportReader=null,serviceApprovalReader=null,runEndorsementReader=null,readRevokedEndorsement=null,sendProtection=null,preparationTransport=null,commandTransport=null,boundAuthority=draftAuthority;
+  if(expectedIdentity!==null)need(value.service_id===expectedIdentity.service_id&&value.database_instance_id===expectedIdentity.database_instance_id,'protected_ingress_identity');
   const authority={authorizeInTransaction(input){need(boundAuthority,'draft_authority_unavailable');return boundAuthority.authorizeInTransaction(input);},
    commitRequestInTransaction(input){boundAuthority?.commitRequestInTransaction?.(input);},
    assertRunCapacityInTransaction(proof){need(boundAuthority?.assertRunCapacityInTransaction,'run_authority_unavailable');boundAuthority.assertRunCapacityInTransaction(proof);},

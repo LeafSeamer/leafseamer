@@ -14,13 +14,13 @@ import {createPeerBindingReceiver} from './peer-binding-receiver.mjs';
 import {createPeerEventReceiver} from './peer-event-receiver.mjs';
 import {createPeerServiceApprovalReader} from './peer-service-approval.mjs';
 import {createPeerRunApprovalEndorsementReader} from './peer-run-approval-endorsement.mjs';
-import {startDraftHttp} from './draft-http.mjs';
-import {same} from './runtime/auth-clock-value.mjs';
+import {assertProtectedDraftAddress,startDraftHttp} from './draft-http.mjs';
+import {fields,same} from './runtime/auth-clock-value.mjs';
 import {contractSelection} from './sdk/index.mjs';
 
 export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticationProvider=null,referenceTimeProvider=null,
  supervisedReference=null,referenceSamplingAuthority=null,onStartupFailure=null,pairing=null,publicApi=null,publicationSource=null,publicationPolicy=null,publicationPolicyFactory=null,
- armAdmissionPolicy=null,executionNotificationSink=null}={}){
+ armAdmissionPolicy=null,executionNotificationSink=null,protectedIngress=null}={}){
  if(!['127.0.0.1','::1'].includes(host)||!Number.isInteger(port)||port<0||port>65535)throw new Error('listen_options');
  if(authenticationProvider!==null&&typeof authenticationProvider!=='function')throw new Error('authentication_provider');
  if(referenceTimeProvider!==null&&(typeof referenceTimeProvider!=='function'||pairing===null))throw new Error('receiver_reference_provider');
@@ -30,6 +30,13 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(publicationPolicyFactory!==null&&(publicationPolicy!==null||publicationSource!==null||typeof publicationPolicyFactory!=='function'))
   throw new Error('publication_source_configuration');
  if(publicApi!==null){if(pairing===null)throw new Error('public_api_pairing_required');pairingUuid(publicApi.binding_id);}
+ if(protectedIngress!==null){
+  if([authenticationProvider,referenceTimeProvider,supervisedReference,referenceSamplingAuthority,pairing,publicApi,publicationSource,
+   publicationPolicy,publicationPolicyFactory,armAdmissionPolicy,executionNotificationSink].some(value=>value!==null))throw new Error('protected_ingress_options');
+  fields(protectedIngress.identity,['service_id','database_instance_id']);
+  pairingUuid(protectedIngress.identity.service_id);pairingUuid(protectedIngress.identity.database_instance_id);
+  assertProtectedDraftAddress(protectedIngress.host,protectedIngress.port);
+ }
  const notificationSink=executionNotificationSink===null?null:{consumerId:executionNotificationSink?.consumerId,deliver:executionNotificationSink?.deliver};
  if(notificationSink!==null){
   pairingUuid(notificationSink.consumerId);
@@ -38,7 +45,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  let authentication,installedPolicy,referenceProvider=null,collectorBinding=null,sampling=null;
  const policy=publicationPolicyFactory===null?publicationPolicy:{assertCurrentInTransaction(reference){return installedPolicy.assertCurrentInTransaction(reference);},
   eventAgePolicy(){return installedPolicy?.eventAgePolicy?.()??null;}};
- const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy});
+ const storage=openStorage(dataDir,{publicationSource,publicationPolicy:policy,armAdmissionPolicy,expectedIdentity:protectedIngress?.identity??null});
  let executionNotifications=null,executionNotificationDelivery=null;
  const closeFailedStartup=async error=>{
   // 监督管道关闭后宿主可立即回收核心，先交付已分类的启动诊断。
@@ -151,6 +158,11 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
     return (await storage.runs.deliverApprovalProtection(operation_id,target_scope)).state;
    }});
   }
+ }
+ if(protectedIngress!==null){
+  const {host,port,cert,key,origin}=protectedIngress;
+  publicTransport=await startDraftHttp({host,port,cert,key,service:storage.identity,bootId:storage.serviceBootId,
+   allowedOrigins:[origin],protectedIngress:true});
  }
  if(executionNotifications)executionNotificationDelivery=startExecutionNotificationDelivery(executionNotifications,notificationSink.deliver);
  }catch(error){identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close()]);await closeFailedStartup(error);throw error;}
