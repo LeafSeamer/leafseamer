@@ -144,25 +144,30 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
   try{return clock.admit(activation,item,sample);}
   catch(error){if(['schedule_admission_window','schedule_admission_clock'].includes(error?.code))return null;throw error;}
  }
+ function readActionScheduleInTransaction(execution,step){
+  need(db.inTransaction&&execution.origin_kind==='schedule'&&same(execution.scope,scope),'admission_transaction');
+  const claim=execution.admission_ref,row=admissions.get(claim.object_id);
+  need(row&&row[1]===claim.digest,'admission_integrity');
+  const admission=original(...row),{schedule_id,occurrence_id}=admission;
+  const activated=readActivation(schedule_id,admission.activation_ref.revision),version=readVersion(schedule_id,admission.schedule_version_ref.revision);
+  need(activated&&version&&admission.execution_id===execution.execution_id&&admission.run_id===execution.run_id&&
+   same(admission.scope,scope)&&same(execution.artifact_ref,admission.artifact_ref)&&same(admission.artifact_ref,version.body.definition_artifact_ref)&&
+   same(activated.ref,admission.activation_ref)&&same(activated.body.schedule_version_ref,version.ref)&&
+   same(admission.schedule_version_ref,version.ref),'admission_integrity');
+  const occurrence=version.body.items.find(item=>item.occurrence_id===occurrence_id);
+  const window=occurrence?.step_windows.find(window=>window.step_id===step.step_id);
+  need(occurrence&&admission.occurrence_plan_digest===digest(occurrence)&&window&&
+   window.action_binding_id===step.payload.binding.action_binding_ref.id,'admission_step_window');
+  const window_index=windowIndex(occurrence);
+  need(admission.step_window_index_digest===digest(window_index),'admission_integrity');
+  return freeze({admission,step_window:window,window_index});
+ }
  return Object.freeze({
   ...(admissions&&{timeForAdmissionInTransaction(source,sample){return freeze(timeFor(source,sample).time);},
-   readActionScheduleInTransaction(execution,step){
-    need(db.inTransaction&&execution.origin_kind==='schedule'&&same(execution.scope,scope),'admission_transaction');
-    const claim=execution.admission_ref,row=admissions.get(claim.object_id);
-    need(row&&row[1]===claim.digest,'admission_integrity');
-    const admission=original(...row),{schedule_id,occurrence_id}=admission;
-    const activated=readActivation(schedule_id,admission.activation_ref.revision),version=readVersion(schedule_id,admission.schedule_version_ref.revision);
-    need(activated&&version&&admission.execution_id===execution.execution_id&&admission.run_id===execution.run_id&&
-     same(admission.scope,scope)&&same(execution.artifact_ref,admission.artifact_ref)&&same(admission.artifact_ref,version.body.definition_artifact_ref)&&
-     same(activated.ref,admission.activation_ref)&&same(activated.body.schedule_version_ref,version.ref)&&
-     same(admission.schedule_version_ref,version.ref),'admission_integrity');
-    const occurrence=version.body.items.find(item=>item.occurrence_id===occurrence_id);
-    const window=occurrence?.step_windows.find(window=>window.step_id===step.step_id);
-    need(occurrence&&admission.occurrence_plan_digest===digest(occurrence)&&window&&
-     window.action_binding_id===step.payload.binding.action_binding_ref.id,'admission_step_window');
-    const window_index=windowIndex(occurrence);
-    need(admission.step_window_index_digest===digest(window_index),'admission_integrity');
-    return freeze({admission,step_window:window,window_index});
+   readActionScheduleInTransaction,
+   canStartActionInTransaction(execution,step,sample){
+    const {admission,step_window}=readActionScheduleInTransaction(execution,step);
+    return clock.canStartStep(admission,step_window,sample);
    },
    prepareAdmissionInTransaction(source,run,execution_id,steps,readClock){
    need(db.inTransaction&&typeof readClock==='function','admission_transaction');

@@ -6,6 +6,7 @@ import {mayContinueAfterFailure,nextExecutionRevision} from './automation-execut
 const maxBytes=1048576;
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
 const reference=(kind,scope,id,hash)=>({kind,scope,object_id:id,revision:'1',digest:hash});
+const originReference=execution=>execution.admission_ref??execution.decision_ref;
 
 export function selectedExecutionSteps(compiled,run,selected){
  const {program}=compiled.compiled;
@@ -28,7 +29,7 @@ export function selectedExecutionSteps(compiled,run,selected){
  return records.map(({step,...group},ordinal)=>({...group,ordinal,step,dependencies:edges.get(step.step_id)}));
 }
 
-export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null,schedules=null}){
+export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null,schedules=null,withScheduledRuntime=false}){
  const writeExecution=db.prepare('INSERT INTO automation_execution(execution_id,run_id,decision_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
  const writeScheduled=schedules&&db.prepare('INSERT INTO automation_execution(execution_id,run_id,occurrence_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
  const advanceScheduledRun=schedules&&db.prepare('UPDATE automation_run_approval_head SET run_revision=? WHERE run_id=? AND run_revision=?');
@@ -75,6 +76,7 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
    need(execution.format==='leafseamer.scheduled-execution/1'&&execution.origin_kind==='schedule'&&same(execution.admission_ref,admission_ref)&&
     admission.format==='leafseamer.schedule-admission/1'&&same(admission.scope,scope)&&admission.occurrence_id===occurrenceId&&
     admission.execution_id===id&&admission.run_id===runId&&admission.service_boot_id===execution.service_boot_id&&
+    (execution.runtime_revision===undefined||execution.runtime_revision==='3'&&execution.origin_digest===admissionHash&&admission.reference_binding)&&
     same(admission.artifact_ref,execution.artifact_ref)&&same(notice,{...common,admission_ref}),'execution_plan_integrity');
    return {execution_ref,execution,admission};
   }
@@ -102,7 +104,8 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   const admission=schedules.prepareAdmissionInTransaction(source,run,execution_id,plan.steps,readClock);
   const admission_ref=reference('schedule_admission',scope,admission.body.occurrence_id,admission.checksum);
   const sealed=persist({execution_id,run_id,artifact_ref,arm_generation,arm_completion_ref,run_revision},
-   {format:'leafseamer.scheduled-execution/1',origin_kind:'schedule',admission_ref,selected_branch:selectedBranch},
+   {format:'leafseamer.scheduled-execution/1',origin_kind:'schedule',admission_ref,selected_branch:selectedBranch,
+    ...(withScheduledRuntime&&{runtime_revision:'3',origin_digest:admission.checksum})},
    {admission_ref},plan,writeScheduled,admission.body.occurrence_id,Buffer.byteLength(admission.text),1);
   put(advanceScheduledRun.run(run_revision,run_id,run.revision));
   plan.assertCurrentInTransaction();
@@ -159,7 +162,7 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   if(!row)return null;
   const body=decode(...row);
   need(body.format==='leafseamer.execution-anchor/1'&&same(body.scope,scope)&&same(body.execution_ref,execution_ref)&&
-   same(body.origin_ref,execution.decision_ref)&&body.service_boot_id===execution.service_boot_id&&body.revision==='1','execution_plan_integrity');
+   same(body.origin_ref,originReference(execution))&&body.service_boot_id===execution.service_boot_id&&body.revision==='1','execution_plan_integrity');
   checkClock(body.clock,body.service_boot_id,execution.approved_before_ns,body.clock.runtime_domain_ref);
   return {ref:reference('execution_anchor',scope,body.anchor_id,row[1]),body};
  }
@@ -359,7 +362,7 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   const at=checkClock(clock,bootId,deadline,domain);
   need(at>=clockInteger(floor.tick_ns),'execution_clock_changed');
   const anchor={format:'leafseamer.execution-anchor/1',anchor_id:randomUUID(),revision:'1',scope,execution_ref,
-   origin_ref:execution.decision_ref,service_boot_id:bootId,clock};
+   origin_ref:originReference(execution),service_boot_id:bootId,clock};
   const anchorDigest=digest(anchor),anchorText=canonical(anchor),charge=reserve(planUsage,budget);
   const roots=steps.filter(({plan})=>plan.dependencies.length===0);
   charge(anchorText);

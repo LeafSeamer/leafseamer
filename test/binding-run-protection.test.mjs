@@ -140,7 +140,7 @@ function eventStream(db,service,bootId,registration=eventRegistration(),triggerD
   const next={...projection,entity_revision:String(Number(sequence)+1),view:{...projection.view,contiguous_sequence:sequence,highest_seen_sequence:sequence}};
   inbox.accept(receipt,frame({entry_kind:'entity.upsert',payload:next},mode),write);
  }
- return {close:clock.stop,advanceReceiver:ns=>fixture.source.advance(ns),baseline:{apply_id:receipt.apply_id,snapshot_ref},read:eventId=>inbox.sourceEvent(source_key,eventId),
+ return {close:clock.stop,executionSample:clock.referenceTimeSample,advanceReceiver:ns=>fixture.source.advance(ns),baseline:{apply_id:receipt.apply_id,snapshot_ref},read:eventId=>inbox.sourceEvent(source_key,eventId),
  projectLive:sequence=>upsert(sequence,'live'),
  async replayLive(){
   const never=()=>assert.fail('同一事件重投不重新取证');
@@ -387,6 +387,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['来源失步后查回成功终态只作历史证据','31',null,'validated','terminal_after_protection'],
  ['R5 规则提交并释放活动执行，下一事件可受理','32',null,'validated','r5_rule'],
  ['排期与事件共享空闲活动槽，受理与版本绑定同事务','38',null,'validated','r5_schedule'],
+ ['Schema 39 paired schedule runtime','39',null,'validated','r5_scheduled_runtime'],
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
@@ -397,19 +398,20 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  const withTerminals=Number(schema_revision)>=30;
  const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5Optional=commandCase==='r5_optional';
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
+ const scheduledRuntime=commandCase==='r5_scheduled_runtime',scheduleCase=scheduledRuntime||commandCase==='r5_schedule';
  const stateMachine=['r5_state','r5_notification'].includes(commandCase)||r5Protected;
  const withAnchors=Number(schema_revision)>=26,omitReady=label==='提交后就绪失败保持保护';
  const triggerBinding=inputFor(registration),limits={event_age_limits:[{authority_id:triggerBinding.authority_id,registration_ref:triggerBinding.registration_ref,
   capture_semantics:'event_occurrence',max_age_ms:1001}],max_condition_nodes:20};
  const compare=left=>({kind:'compare',operator:'eq',value_type:boolean,left,right:{kind:'literal',value:true}});
- const condition=commandCase==='r5_schedule'?{kind:'literal',value:true}:{kind:'any',items:[compare(reference()),{kind:'all',items:[
+ const condition=scheduleCase?{kind:'literal',value:true}:{kind:'any',items:[compare(reference()),{kind:'all',items:[
   compare({...reference(),pointer:'/request_observation'}),compare(reference('observation','observation'))]}]};
  const projections=[...input().projections,{pointer:'/request_observation',value_type:boolean,reads:[]}];
  const triggerReview=hasTarget?{condition,policyDigest:digest(limits),extraInputs:[input('observation','observation')],
   ...(stateMachine&&{stateMachine:true}),
   ...(delayCase&&{beforeSteps:[{...delayStep('before-a'),delay_ms:5,max_lateness_ms:10},{...delayStep('before-b'),delay_ms:15,max_lateness_ms:20}]}),
   ...(parameterCase&&{actionParameters:{...(r5Optional&&{required:false,failure_policy:'continue_if_independent'}),parameter_bindings:[{target_pointer:'/value',
-   value:commandCase==='r5_schedule'?{kind:'literal',value:true}:parameterCase==='unknown'?{...reference(),pointer:'/request_observation'}:reference()}],
+   value:scheduleCase?{kind:'literal',value:true}:parameterCase==='unknown'?{...reference(),pointer:'/request_observation'}:reference()}],
    ...(parameterCase==='guard'&&{guard:{kind:'literal',value:false}})}}),
   ...(executionPlanning&&{extraSteps:[delayStep('after-action')]})}:null;
  const f=setup(t,{revision:schema_revision,withoutActions:!hasTarget,triggerBinding:{...triggerBinding,projections},triggerReview}),{scope,draft}=f,contextId=id(),bootId=f.store.serviceBootId;
@@ -417,7 +419,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  f.store.close();
  inspect(f.dir,db=>{
   const subject=id();db.prepare('INSERT INTO local_subject VALUES(?,?,?,?,?)').run(subject,actor.issuer_id,actor.issuer_epoch,actor.principal_id,'human');
-  const body=commandCase==='r5_schedule'?{context:{operations:['activateSchedule','publishSchedule']}}:{};
+  const body=scheduleCase?{context:{operations:['activateSchedule','publishSchedule']}}:{};
   db.prepare('INSERT INTO local_request_context VALUES(?,?,?,?,?)').run(contextId,subject,bootId,canonical(body),digest(body));
  });
  f.reopen();const boot=f.store.serviceBootId,published=await f.publish();
@@ -454,7 +456,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   authEvidence.grant_ref=proof;
   authEvidence.credential={issuer_service_id:target?.authority_service_id??id(),token_id:id(),session_id:id(),session_revision:'1',credential_id:id(),
    policy_revision:'1',scope_digest:digest('issuer scope'),recent_before_ns:pairing.expires_ns};
-  const counts={rows:'40',logical_bytes:commandCase?'48000':delayCase||parameterCase?'26000':executionPlanning?'12000':'8000',queue_slots:'1',work_units:'60'};
+  const counts={rows:'40',logical_bytes:scheduledRuntime?'56000':commandCase?'48000':delayCase||parameterCase?'26000':executionPlanning?'12000':'8000',queue_slots:'1',work_units:'60'};
   const source={state:'synchronized',source:{baseline_ref:{apply_id:id()},continuity:{connection_generation:'1',delivery_cursor:'2'}}};
   const settings={approval_file:path.join(f.dir,'publication-approval.json')};
   const installationApproval={format:'leafseamer.publication-policy-approval/2',policy_ref:f.content.policy_ref,not_before_ns:'0',expires_ns:'18446744073709551615',...limits};
@@ -466,7 +468,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   const control={control_ref:{id:id(),revision:'1',digest:digest('device control original')},control_epoch:id(),effective_version:'0',
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
-  let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead;
+  let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
    publications:automationPublicationStore({db,service:{...f.identity,schema_revision},isOpen:()=>db.open}),eventAgePolicy:installed?.eventAgePolicy,
@@ -499,7 +501,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     return {profile_ref:proof,qualification_ref:proof,capacity:{...counts,rows:limited?'39':'40'},required:counts};}}};
   const schedulesFor=(data,bootId)=>scheduleStore({db:data,service:assembly.service,bootId,isOpen:()=>data.open,
    authority:assembly.authority,publications:assembly.publications});
-  if(commandCase==='r5_schedule')assembly.schedules=schedulesFor(db,boot);
+  if(scheduleCase)assembly.schedules=schedulesFor(db,boot);
   const runs=automationRunStore(assembly);
   t.after(()=>runs.stopExecutionTimers?.());
   let preCommitTick=null,postCommitTick=null;
@@ -605,16 +607,21 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    const queriedSockets=new WeakSet();
    const commands=commandCase?{
     async submit(_binding,socket,request){
-     assert.equal(++commandSubmits,1);
+     assert.ok(++commandSubmits<=(scheduledRuntime?2:1));
      assert.equal(db.inTransaction,false);
      inspect(f.dir,other=>{
       const saved=other.prepare(`SELECT s.body_jcs FROM automation_execution_submission s
-       JOIN automation_execution_submission_attempt a USING(execution_id,step_id)`).pluck().all();
-      assert.equal(saved.length,1);
-      assert.deepEqual(JSON.parse(saved[0]).request,request);
+       JOIN automation_execution_submission_attempt a USING(execution_id,step_id)
+       WHERE s.execution_id=? AND s.step_id=?`).pluck().get(request.action.execution_ref.object_id,request.action.step_id);
+      assert.deepEqual(JSON.parse(saved).request,request);
      });
      const observed=await observeActionBinding(request.action);
      assert.deepEqual(observed.original.parameters.body.parameters,{value:true});
+     if(observed.original.execution.origin_kind==='schedule'){
+      assert.equal(scheduledRuntime,true);
+      const adoption=controllerActions?.actionAdmissionBinding(observed.original,controllerActions.actionAdmissionRequest(request.action,target),observedActionPreparation);
+      observedScheduled={binding:observed.original,adoption};
+     }
      assert.deepEqual(request.target,action);
      sentCommand=request;
      const principal=remoteReceipt.applied_receipt.grant.principal;
@@ -802,10 +809,10 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     assert.deepEqual(decision.arm_completion_ref,ready.completion_ref);
     assert.equal(decision.ingest_revision_before,'2');assert.equal(decision.ingest_revision_after,'3');
     assert.equal(decision.run_revision_before,'4');assert.equal(decision.run_revision_after,'4');assert.equal(decision.execution_id,null);
-    if(commandCase==='r5_schedule')executionGrantDenied=true;
+    if(scheduleCase)executionGrantDenied=true;
     const exact=await verified.live('2',{value:false,request_observation:false});
     const result=event=>event.trigger_decision_set.decisions.find(value=>value.run_id===run.run_id);
-    if(commandCase==='r5_schedule'){
+    if(scheduleCase){
      assert.equal(result(exact).reason,'execution_grant_unavailable');
      executionGrantDenied=false;
     }else{
@@ -1111,28 +1118,31 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          assert.throws(()=>db.exec('DELETE FROM automation_execution_commit'),/immutable_execution_commit/);
         }
         // 验证下一事件的状态和槽选择，仅观察受理。
-        runs.stopExecutionTimers();
-        if(commandCase==='r5_schedule'){
+        if(!scheduledRuntime)runs.stopExecutionTimers();
+        if(scheduleCase){
          const schedules=assembly.schedules,scheduleId=id(),context=()=>({context_id:contextId,idempotency_key:id()});
          const item={item_id:'programme',one_shot_key:'show',local_start:new Date(sampledAt).toISOString().slice(0,-1),offset:'+00:00',
           steps:[{step_id:'first',role:'on_air',start_offset_ms:0,latest_start_offset_ms:1500}]};
          const input={context:context(),definition_id:draft.definition_id,definition_version:published.definition_version,
           expected_artifact_ref:published.artifact_ref,expected_version:null,items:[item,{...item,item_id:'overlap'}]};
          const version=schedules.publish(null,scheduleId,input);
-         const clockDomain={clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:digest('schedule domain')};
-         const binding={domain:{...scope,...clockDomain}},anchor={binding,anchor_tick_ns:'0',exchange_start_tick_ns:'0',
+         const runtimeSample=scheduledRuntime?verified.executionSample():null,tickBase=runtimeSample?BigInt(runtimeSample.tick_ns):0n;
+         const tick=offset=>String(tickBase+BigInt(offset));
+         const clockDomain=runtimeSample?.runtime_domain_ref??{clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:digest('schedule domain')};
+         const binding={domain:{...scope,...clockDomain}},anchor={binding,anchor_tick_ns:tick(0),exchange_start_tick_ns:tick(0),
           utc_at_anchor:{lower_ns:String(epoch-1010n),upper_ns:String(epoch-1000n)}};
-         const reference={service_boot_id:boot,valid_before_tick_ns:'10000',state:{binding,status:'qualified'},
+         const reference={service_boot_id:boot,valid_before_tick_ns:tick(10000),state:{binding,status:'qualified'},
           bundle:{anchor,bundle_id:id(),bundle_digest:digest(anchor),profile:{elapsed_error_ppm:0,span_quantization_ns:'1'},
            policy:{max_half_width_ns:'25',max_anchor_age_ns:'20000',max_exchange_age_ns:'20000',max_upstream_age_ns:'20000'},
            error:{upstream_age_upper_at_m1_ns:'0'}}};
-         const sample=tick_ns=>({clock:{tick_ns,domain:clockDomain},reference});
+         const sample=offset=>({clock:{tick_ns:tick(offset),domain:clockDomain},reference});
          const activation=schedules.activate(null,scheduleId,{context:context(),expected_revision:null,schedule_version_ref:version.ref},()=>sample('500'));
          const occurrence=version.body.items[0],source={schedule_id:scheduleId,occurrence_id:occurrence.occurrence_id,activation_ref:activation.ref,run_id:run.run_id};
-         const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock);
+         const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock,scheduledRuntime?verified.executionSample:undefined);
+         if(scheduledRuntime)verified.advanceReceiver(1020n);
          const viewAt=tick=>schedules.get(null,scheduleId,null,{readClock:()=>sample(tick),inspect:runs.inspectScheduleInTransaction}).occurrences[0];
          assert.equal(viewAt('999').qualification,undefined);
-         assert.deepEqual(viewAt('1020').qualification,{state:'ready_for_preparation',selected_branch:'rule',first_step_id:'first',observed_tick_ns:'1020'});
+         assert.deepEqual(viewAt('1020').qualification,{state:'ready_for_preparation',selected_branch:'rule',first_step_id:'first',observed_tick_ns:tick(1020)});
          const {leaves:[listener],ca}=peerCertificates();
          const app=await startDraftHttp({cert:listener.cert,key:listener.key,bindingId:id(),service:assembly.service,bootId:boot,
           receiver:{async prepare(){return null;}},authorization:{},drafts:{},runs,localSchedules:schedules,scheduleClock:()=>sample('1020')});
@@ -1168,6 +1178,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          await assert.rejects(admit(),{code:'schedule_storage'});
          db.exec('DROP TRIGGER omit_schedule_claim');
          untouched();
+         terminalReply=null;
          const accepted=await admit();
          assert.equal(accepted.admission.occurrence_id,occurrence.occurrence_id);
          assert.deepEqual(accepted.admission.activation_ref,activation.ref);
@@ -1178,7 +1189,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          assert.deepEqual(execution.execution_ref,accepted.execution_ref);
          assert.equal(execution.execution.origin_kind,'schedule');
          assert.equal(execution.execution.receive_cursor,undefined);
-         assert.equal(execution.anchor,null);
+         if(scheduledRuntime){
+          assert.deepEqual(execution.anchor.body.origin_ref,execution.execution.admission_ref);
+          assert.equal(execution.anchor.body.clock.tick_ns,tick(1020));
+          assert.deepEqual(execution.steps[0].ready.body.execution_anchor_ref,execution.anchor.ref);
+         }else assert.equal(execution.anchor,null);
          assert.equal(execution.steps[0].plan.step_id,accepted.admission.first_step_id);
          assert.equal(runs.get(null,run.run_id).active_execution_id,accepted.execution_ref.object_id);
          assert.equal(runs.get(null,run.run_id).revision,'7');
@@ -1200,7 +1215,20 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           window_index:occurrence.step_windows.map(({step_id,step_window_digest})=>({step_id,step_window_digest}))});
          assert.throws(()=>db.transaction(()=>schedules.readActionScheduleInTransaction(execution.execution,{...step,step_id:'other'}))(),
           {code:'schedule_admission_step_window'});
-         if(controllerActions){
+         if(scheduledRuntime){
+          const canStart=reading=>db.transaction(()=>schedules.canStartActionInTransaction(execution.execution,step,reading))();
+          assert.equal(canStart(sample(1020)),true);
+          assert.throws(()=>canStart(sample(1019)),{code:'schedule_execution_clock'});
+          const changed=structuredClone(sample(1021));
+          changed.reference.bundle.anchor.binding.generation='2';
+          changed.reference.state.binding=changed.reference.bundle.anchor.binding;
+          assert.throws(()=>canStart(changed),{code:'schedule_execution_clock'});
+          const elapsed=structuredClone(sample(1021));
+          const end=BigInt(occurrence.step_windows[0].window.not_after_utc_ns);
+          elapsed.reference.bundle.anchor.utc_at_anchor={lower_ns:String(end-1033n),upper_ns:String(end-1022n)};
+          assert.throws(()=>canStart(elapsed),{code:'schedule_execution_window_elapsed'});
+         }
+         if(controllerActions&&!scheduledRuntime){
           const grant=execution.execution.grant_basis[0],eligible_before_ns=execution.execution.approved_before_ns;
           // Readiness and parameter fixtures isolate the transport. The occurrence and execution are the committed Seamer originals.
           const readyBody={format:'leafseamer.step-ready/1',ready_id:id(),execution_ref:execution.execution_ref,step_id:step.step_id,
@@ -1241,12 +1269,46 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.throws(()=>controllerActions.actionAdmissionBinding(old,checked,observedActionPreparation),{code:'peer_pairing_input'});
           scheduledActionRead=null;
          }
-         assert.equal(commandSubmits,1);
+         let finalExecution=execution;
+         if(scheduledRuntime){
+          const until=performance.now()+7000;
+          do{
+           finalExecution=runs.getExecution(null,accepted.execution_ref.object_id);
+           assert.equal(finalExecution.protection,null);
+           if(finalExecution.steps[0].submission?.state==='accepted')break;
+           await wait(25);
+          }while(performance.now()<until);
+          const first=finalExecution.steps[0];
+          assert.equal(first.submission?.state,'accepted');
+          assert.deepEqual(observedScheduled.binding.parameters,first.prepared_parameters);
+          assert.deepEqual(observedScheduled.binding.step_ready,first.ready);
+          assert.deepEqual(observedScheduled.binding.schedule,readSchedule());
+          if(controllerActions)assert.deepEqual(observedScheduled.adoption.schedule_binding.window,occurrence.step_windows[0].window);
+          const command_ref=savedAdjudication.command_ref,evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
+          const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',outcome:'succeeded',effect_status:'verified',
+           resource_status:'clear',automation_continuation:'eligible',reason_code:null,terminal_revision:'5',resolution_ref:null,attempt_ids:[id()],
+           completion_evidence_refs:[evidence('decision')],resource_evidence_refs:[evidence('release')]};
+          terminalReply={format:'leafseamer.automation-command-terminal/1',command_ref,state,
+           record_ref:{...command_ref,revision:'5',digest:digest('scheduled terminal')},
+           state_ref:{id:command_ref.object_id+'_state_5',revision:'5',digest:digest(state)},completion_achieved:'effect_verified'};
+          const completeBefore=performance.now()+7000;
+          do{
+           finalExecution=runs.getExecution(null,accepted.execution_ref.object_id);
+           assert.equal(finalExecution.protection,null);
+           if(finalExecution.completion)break;
+           await wait(25);
+          }while(performance.now()<completeBefore);
+          assert.deepEqual(finalExecution.steps[0].submission.terminal,terminalReply);
+          assert.equal(finalExecution.completion?.body.run_revision_after,'8');
+          assert.equal(runs.get(null,run.run_id).active_execution_id,null);
+          runs.stopExecutionTimers();
+         }
+         assert.equal(commandSubmits,scheduledRuntime?2:1);
          assert.deepEqual(db.pragma('foreign_key_check'),[]);
          inspect(f.dir,reopened=>{
           const bootId=id(),schedules=schedulesFor(reopened,bootId);
           const historical=automationRunStore({...assembly,db:reopened,bootId,isOpen:()=>reopened.open,schedules});
-          assert.deepEqual(historical.getExecution(null,accepted.execution_ref.object_id),execution);
+          assert.deepEqual(historical.getExecution(null,accepted.execution_ref.object_id),finalExecution);
           assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
          });
          return;
@@ -1284,10 +1346,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           reopened.exec('DROP TABLE schedule_execution_admission');
          });
          assert.equal(migrateStorage(f.dir,'38').database_instance_id,service.database_instance_id);
+         assert.equal(migrateStorage(f.dir,'39').database_instance_id,service.database_instance_id);
          inspect(f.dir,reopened=>{
           assert.deepEqual(reopened.prepare('SELECT execution_id,body_jcs,body_digest FROM automation_execution ORDER BY execution_id').raw().all(),executions);
           assert.deepEqual(reopened.pragma('foreign_key_check'),[]);
-          const historical=automationRunStore({...assembly,db:reopened,service:{...service,schema_revision:'38'},bootId:id(),
+          const historical=automationRunStore({...assembly,db:reopened,service:{...service,schema_revision:'39'},bootId:id(),
            isOpen:()=>reopened.open});
           assert.deepEqual(historical.getExecution(null,decision.execution_id),originalExecution);
          });

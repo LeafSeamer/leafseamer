@@ -143,9 +143,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const withActionParameters=Number(service.schema_revision)>=28;
  const withCommandDependencies=Number(service.schema_revision)>=31;
  const withRunCommit=Number(service.schema_revision)>=32;
+ const withScheduledRuntime=Number(service.schema_revision)>=39&&schedules!==null;
  const executionCommits=withRunCommit?automationExecutionCommit(db):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
- const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules}):null;
+ const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules,withScheduledRuntime}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
   JOIN automation_execution e USING(execution_id) WHERE h.definition_id=?`).pluck();
  const busySlot=schedules&&db.prepare('SELECT 1 FROM automation_execution_head WHERE definition_id=?').pluck();
@@ -468,11 +469,13 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   submissionRecovery=()=>{active=false;clearTimeout(timer);submissionRecovery=null;};
   timer=setTimeout(scan,5000).unref();
  }
- function scheduleExecution(item,sample,checkConnection,predecessor,readEvent,recheckDelivery){
+ function scheduleExecution(item,{sample,checkConnection,predecessor,readEvent,recheckDelivery,scheduleClock}){
   if(!executionScheduling)return;
   const id=item.execution_ref.object_id;
   const running=()=>executionScheduling&&isOpen()&&db.open;
-  let lastTick=null,terminalPoll=0,awaitingInitialProjection=true;
+  const scheduled=scheduleClock!==undefined;
+  const canStart=(execution,step)=>!scheduled||schedules.canStartActionInTransaction(execution,step.plan,scheduleClock());
+  let lastTick=null,terminalPoll=0,awaitingInitialProjection=!scheduled;
   function currentSample(){
    const result=sample(),tick=BigInt(result.tick_ns);
    need(lastTick===null||tick>=lastTick,'execution_clock_changed');
@@ -488,9 +491,14 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    arm.assertPolicy(preflight.observation,preflight.basis);
    for(const {pairing_ref} of execution.grant_basis)currentPairingInTransaction(pairing_ref);
    const sources=resolveAutomationSourcesInTransaction(readDependencies(run).body.dependencies.inputs);
-   checkConnection();
+   need(execution.origin_kind===(scheduled?'schedule':'trigger'),'execution_action_origin');
    const onArmedBaseline=source=>source&&run.arm_source_baselines.some(baseline=>same(source.baseline_ref,baseline));
    const synchronized=({state,source})=>state==='synchronized'&&source?.continuity&&onArmedBaseline(source);
+   if(scheduled){
+    need(sources.every(synchronized),'execution_delay_source');
+    return {...inputs,run,sources};
+   }
+   checkConnection();
    const sameConnection=source=>source.continuity.connection_generation===predecessor.connection_generation;
    const synchronizedTrigger=sources.some(item=>synchronized(item)&&same(item.source.baseline_ref,predecessor.baseline_ref)&&sameConnection(item.source));
    if(allowPendingProjection&&sources.some(item=>item.state==='baseline_required')){
@@ -531,7 +539,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const value=executions.read(id),{execution,execution_ref,anchor,steps}=value;
     const {run,sources,operation}=assertCurrent(execution,bundle.publication);
     bundle.assertOriginalInTransaction();
-    need(same(execution_ref,item.execution_ref)&&execution.origin_kind==='trigger'&&same(run,initial.run)&&same(sources,initial.sources)&&
+    need(same(execution_ref,item.execution_ref)&&same(run,initial.run)&&same(sources,initial.sources)&&
      same(run.business_state,execution.business_state)&&same(execution.artifact_ref,bundle.publication.result.artifact_ref),'execution_commit_changed');
     const slot=slotFor(run.definition_id),evidence=completionEvidence(steps);
     need(evidence&&same(slot,{...execution.activation_slot,revision:execution.activation_slot_revision}),'execution_commit_evidence');
@@ -551,7 +559,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     bytes=>executions.reserveSubmission(value,item,bytes,1));
     need(publicationBasisCurrent(run,bundle.publication)&&
      same(sources,resolveAutomationSourcesInTransaction(readDependencies(run).body.dependencies.inputs)),'execution_commit_changed');
-    checkConnection();recheckGrants();
+    checkConnection?.();recheckGrants();
     const finalClock=currentSample();
     executions.completionClock(value,finalClock);
     need(observed.every(result=>BigInt(finalClock.upper_ns)<BigInt(result.original.eligible_before_ns)),'execution_commit_grant');
@@ -570,8 +578,9 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const {execution}=current,binding=step.plan.payload.binding;
     bundle.assertOriginalInTransaction();
     const {grants}=assertCurrent(execution,publication);
-    const observed=readEvent(execution.receive_cursor);
-    need(observed.origin_digest===execution.origin_digest,'execution_action_origin');
+    const observed=scheduled?null:readEvent(execution.receive_cursor);
+    if(scheduled)need(canStart(execution,step),'schedule_execution_window');
+    else need(observed.origin_digest===execution.origin_digest,'execution_action_origin');
     const grant=grants.find(candidate=>same(candidate.request.grant_ref,binding.grant_ref));
     const approved=execution.grant_basis.find(candidate=>same(candidate.grant_ref,binding.grant_ref));
     need(grant&&approved&&same(grant.request.lookup,approved.lookup)&&same(grant.request.receipt_ref,approved.receipt_ref)&&
@@ -587,7 +596,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const captured=writer(()=>snapshot(originalDeadline));
    const {compiled}=publication,stepPlan=compiled.stepPlan(stepId);
    need(stepPlan,'execution_action_plan');
-   const snapshots=eventInputSnapshots(compiled.compiled.input_bindings,captured.observed.origin);
+   const snapshots=captured.observed?eventInputSnapshots(compiled.compiled.input_bindings,captured.observed.origin):new Map();
    need(evaluateExpression(stepPlan.guard,snapshots).value===true,'execution_action_guard');
    const schemas=new Map(publication.snapshot.schemas.map(({binding_id,schema_ref,document})=>[binding_id,{schema_ref,document}]));
    const [parameters,eligibility]=await Promise.allSettled([
@@ -660,8 +669,13 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
      const state=assertCurrent(value.execution,undefined,awaitingInitialProjection);
      if(state.projectionPending)return {next:20000000n,actions:[],pending:[],completed:false};
      awaitingInitialProjection=false;
-     const next=executions.advanceDelays(value,item,currentSample,()=>assertCurrent(value.execution));
-     const actions=withActionParameters?value.steps.filter(step=>step.plan.payload.kind==='action'&&step.ready&&!step.prepared_parameters):[];
+     let next=executions.advanceDelays(value,item,currentSample,()=>assertCurrent(value.execution));
+     const actions=[];
+     if(withActionParameters)for(const step of value.steps){
+      if(step.plan.payload.kind!=='action'||!step.ready||step.prepared_parameters)continue;
+      if(canStart(value.execution,step))actions.push(step);
+      else if(next===null||next>50000000n)next=50000000n;
+     }
      const pending=withCommandDependencies?value.steps.filter(step=>step.submission?.state==='accepted'&&!step.submission.terminal):[];
      return {next,actions,pending,completed:withRunCommit&&completionEvidence(value.steps)!==null};
     });
@@ -707,6 +721,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
      same(request.preparation,{lookup:grant.lookup,grant_ref:grant.grant_ref,receipt_ref:grant.receipt_ref}),'execution_action_peer');
     const eligible_before_ns=step.prepared_parameters.body.eligible_before_ns;
     executions.assertActionWindow(value,step,currentSample(),eligible_before_ns);
+    need(canStart(value.execution,step),'schedule_execution_window');
     return {execution:value.execution,step_plan:step.plan,step_ready:step.ready,parameters:step.prepared_parameters,eligible_before_ns,
      ...(value.execution.origin_kind==='schedule'&&{schedule:schedules.readActionScheduleInTransaction(value.execution,step.plan)})};
    });
@@ -1225,14 +1240,15 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
    need(db.inTransaction,'execution_schedule_transaction');
    return Boolean(busySlot.get(definitionId));
-  },async admitScheduledOccurrence(source,readClock){
-   need(typeof readClock==='function','execution_schedule_dependencies');
+  },async admitScheduledOccurrence(source,readClock,sample){
+   need(typeof readClock==='function'&&(!withScheduledRuntime||typeof sample==='function'&&executionScheduling),'execution_schedule_dependencies');
    const fixed=structuredClone(source);
    checked('LifecycleId',fixed.run_id);
    const captured=writer(()=>proposalRun(fixed.run_id));
    const {publication,assertOriginalInTransaction}=publications.prepareExecutionProgram(captured.definition_id,captured.definition_version);
    const grants=await prepareExecutionGrants(()=>[fixed.run_id]);
-   return writer(()=>{
+   const {item,recheck}=writer(()=>{
+    need(!withScheduledRuntime||executionScheduling,'execution_schedule_dependencies');
     const run=currentRun(proposalRun(fixed.run_id));
     need(run.lifecycle==='armed'&&run.active_execution_id===null&&run.pause_latches.length===0,'execution_schedule_run');
     const approval=approvals.currentAuthorityInTransaction(run);
@@ -1244,8 +1260,35 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const selectedBranch=selection.selected_branch;
     const plan=planExecution(run,publication,approval,selectedBranch,{grants});
     need(plan,'execution_schedule_grant');
-    return executions.recordScheduled(run,fixed,selectedBranch,plan,readClock);
+    return {item:executions.recordScheduled(run,fixed,selectedBranch,plan,readClock),recheck:plan.assertCurrentInTransaction};
    });
+   if(withScheduledRuntime){
+    const {execution_ref,admission}=item;
+    try{
+     const afterCommit=sample(),floor={runtime_domain_ref:admission.clock.domain,tick_ns:admission.clock.tick_ns};
+     const hasWork=writer(()=>{
+      const saved=executions.read(execution_ref.object_id),execution=saved?.execution;
+      need(execution?.origin_kind==='schedule'&&same(saved.execution_ref,execution_ref),'execution_anchor_identity');
+      const run=currentRun(proposalRun(execution.run_id));
+      need(run.active_execution_id===execution.execution_id&&run.revision===execution.run_revision&&
+       same(run.pause_latches,[execution.execution_id]),'execution_anchor_inactive');
+      approvals.currentAuthorityInTransaction(run);
+      const first=saved.steps.find(({plan})=>plan.step_id===admission.first_step_id);
+      const check=()=>{
+       recheck();
+       need(first&&schedules.canStartActionInTransaction(execution,first.plan,readClock()),'schedule_execution_window');
+      };
+      check();
+      const result=executions.anchorAdmission(saved,item,floor,afterCommit,sample);
+      check();
+      return result;
+     });
+     if(hasWork)scheduleExecution(item,{sample,scheduleClock:readClock});
+    }catch{
+     // Once admission commits, a failed anchor leaves the active slot paused.
+    }
+   }
+   return item;
   }}),
   ...(executions&&{getExecution(authentication,executionId){return writer(()=>{
    const result=executions.read(executionId);need(result,'execution_missing');
@@ -1305,7 +1348,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
       });
       if(withDelays&&hasWork){
        const {execution_ref,planUsage,budget}=item;
-       scheduleExecution({execution_ref,planUsage,budget},sample,checkConnection,liveEvidence.predecessor,readEvent,recheckDelivery);
+       scheduleExecution({execution_ref,planUsage,budget},{sample,checkConnection,predecessor:liveEvidence.predecessor,readEvent,recheckDelivery});
       }
      }catch{
       // 原事件已经持久提交。缺少锚的活动槽保持暂停，重投不补锚。

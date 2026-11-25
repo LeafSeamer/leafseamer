@@ -37,7 +37,7 @@ function qualify(sample,scope,boot){
   ageExpiry(m1,BigInt(policy.max_exchange_age_ns)),
   ageExpiry(m1,BigInt(policy.max_upstream_age_ns)-BigInt(error.upstream_age_upper_at_m1_ns)),widthExpiry);
  if(t>=before||upper-lower>width)return null;
- return {lower,upper,before,
+ return {lower,upper,before,binding:anchor.binding,
   firstAt:start=>firstUpperTick(m4,start-atUpper,million+rate,bias),
   bundle_ref:reference(bundle.bundle_id,bundle.bundle_digest)};
 }
@@ -124,8 +124,17 @@ export function scheduleClockStore(db,scope,boot,wasAdmitted){
    const now=BigInt(sample.clock.tick_ns);
    need(now>=prior.observed&&now>=prior.enter&&now<prior.before&&
     proof.lower>=BigInt(step.window.not_before_utc_ns)&&proof.upper<BigInt(step.window.not_after_utc_ns),'schedule_admission_window');
-   return {first_step_id:step.step_id,step_window_ref,boundary_ref:prior.ref,clock:sample.clock,reference_bundle_ref:proof.bundle_ref,
+   return {first_step_id:step.step_id,step_window_ref,boundary_ref:prior.ref,clock:sample.clock,reference_bundle_ref:proof.bundle_ref,reference_binding:proof.binding,
     utc_interval:{lower_ns:String(proof.lower),upper_ns:String(proof.upper)}};
+  },
+  canStartStep(admission,step,sample){
+   need(db.inTransaction,'schedule_admission_transaction');
+   const proof=qualify(sample,scope,boot);
+   need(proof&&admission.service_boot_id===boot&&same(admission.clock.domain,sample.clock.domain)&&
+    same(admission.reference_binding,proof.binding)&&BigInt(sample.clock.tick_ns)>=BigInt(admission.clock.tick_ns),
+    'schedule_execution_clock');
+   need(proof.upper<BigInt(step.window.not_after_utc_ns),'schedule_execution_window_elapsed');
+   return proof.lower>=BigInt(step.window.not_before_utc_ns);
   },
   blockBusy(activation,item,time){
    const prior=clockRecord(item.occurrence_id),step=firstWindow(item);
