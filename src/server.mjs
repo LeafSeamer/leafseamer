@@ -113,7 +113,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    collectorBinding=Object.freeze({runtime_id:linuxBinding.runtimeId,runtime_digest:linuxBinding.digest,
     clock_domain_ref:linuxRuntime.binding.receipt.domain_ref,provider_pid:linuxReference.provider.process_observation.provider_pid});
    if(installedCapture)sampling=await storage.openReferenceSampling({binding:linuxBinding,collector:linuxCollector,authentication,authority:installedCapture,
-    archiveOnly:true,supervision:{assertCurrent:linuxReference.assertCurrent,observeTimeProviderRetirement:()=>null,
+    archiveOnly:installedCapture.referenceAuthority===undefined,
+    supervision:{assertCurrent:linuxReference.assertCurrent,observeTimeProviderRetirement:()=>null,
      assertTimeProviderRetirement(){throw new Error('time_provider_poll_retirement_unavailable');}}});
   }
   if(armAdmissionApproval!==null){
