@@ -23,8 +23,57 @@ function requestHttps(origin,ca,{method,target,headers,body,credential}){
   req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('acceptance_https_timeout')));req.end(body);
  });
 }
+async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh}){
+ async function request(operation,input){
+  const body=Buffer.from(canonical({operation,request:input}));
+  const response=await requestHttps(origin,ca,{target:'/auth/local-schedules/v1',method:'POST',body,
+   headers:[bearer,['content-type','application/json'],['content-length',String(body.length)]]});
+  assert.equal(response.status,'200',response.body.toString());
+  return JSON.parse(response.body).result;
+ }
+ const context=async operation_id=>({context_id:(await request('create-context',{operation_id,ttl_ms:30000,max_unique_requests:1})).context_id,
+  idempotency_key:id()});
+ const schedule_id=id(),publishContext=await context('publishSchedule'),activateContext=await context('activateSchedule');
+ const {current}=await seamer('nativeReferenceStatus');
+ assert.equal(current?.status,'conditional');
+ const local_start=new Date(Number(BigInt(current.upper_utc_ns)/1000000n)+5000).toISOString().slice(0,-1);
+ const steps=program.program.groups.flatMap(({steps})=>steps.filter(step=>step.kind==='action')).map(({step_id})=>
+  ({step_id,role:'on_air',start_offset_ms:0,latest_start_offset_ms:12000}));
+ assert.equal(steps.length,1);
+ const published=await request('publish',{schedule_id,version:{context:publishContext,definition_id:armed.definition_id,
+  definition_version:armed.definition_version,expected_artifact_ref:armed.artifact_ref,expected_version:null,
+  items:[{item_id:'show',one_shot_key:'once',local_start,offset:'+00:00',steps}]}});
+ const activation=await request('activate',{schedule_id,activation:{context:activateContext,expected_revision:null,schedule_version_ref:published.ref}});
+ const read=()=>request('get',{schedule_id,version:null});
+ const tracked=await read();
+ assert.equal(tracked.occurrences[0].state,'tracking');
+ assert.equal(frames.some(f=>f.event==='automation-target-accepted'),false);
+ const until=performance.now()+22000;
+ let accepted;
+ do{
+  const failure=frames.find(f=>f.event==='peer-transport-failure'&&f.method==='submitAutomationCommand');
+  assert.equal(failure,undefined,JSON.stringify(failure));
+  accepted=frames.find(f=>f.event==='automation-target-accepted');
+  if(accepted)break;
+  await delay(50);
+ }while(performance.now()<until);
+ const view=await read(),occurrence=view.occurrences[0];
+ assert.equal(occurrence.state,'accepted',JSON.stringify({state:occurrence.state,reason:occurrence.stop?.reason??occurrence.qualification?.reason}));
+ assert.ok(accepted,'Controller did not durably accept the scheduled command');
+ const {admission}=occurrence;
+ assert.deepEqual(admission.activation_ref,activation.ref);
+ const execution=await seamer('nativeTriggerExecution',{identity:await refresh(),execution_id:admission.execution_id});
+ assert.equal(execution.execution.origin_kind,'schedule');
+ assert.deepEqual(execution.admission,admission);
+ const step=execution.steps[0];
+ assert.deepEqual(step.prepared_parameters.body.parameters,{value:12});
+ assert.equal(step.plan.step_id,admission.first_step_id);
+ frames.push({event:'native-scheduled-target-admission',reference:accepted.reference,grant_ref:grantRef,admission,
+  receiver_reference:'native'});
+}
 export async function verifyNativeEventRead({frames,core,config,materials}){
- const nativeReceiver=config.source_reference_capture&&process.env.LEAFSEAMER_EVENT_RECEIVER_NATIVE_TEST==='1';
+ const scheduledAdmission=config.scheduled_admission===true;
+ const nativeReceiver=config.source_reference_capture&&(scheduledAdmission||process.env.LEAFSEAMER_EVENT_RECEIVER_NATIVE_TEST==='1');
  const nativeReferenceAssets=nativeReceiver?process.env.LEAFSEAMER_SUPERVISOR_DIST:null;
  if(nativeReceiver)assert.ok(config.first_enrollment&&nativeReferenceAssets&&path.isAbsolute(nativeReferenceAssets));
  let referenceWitness=null;
@@ -56,7 +105,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
   const second=await seamer('initialize',{role:'seamer',material:materials.leaves[1],ca:materials.ca,issuer,principal_id:first.principal_id,
    allowedOrigins:gui?[gui.origin]:[],reconcileIngest:config.verifyEventChannel===true,eventApprovals:config.incremental_source_event===true,
    receiverReference:config.source_reference_capture===true&&!nativeReceiver,nativeReferenceAssets,referenceTimeline,
-   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource,managedSubscriptions});assert.notEqual(first.pid,second.pid);
+   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource,managedSubscriptions,scheduledAdmission});assert.notEqual(first.pid,second.pid);
   if(browser){
    const directory=path.dirname(config.request),siteFile=path.join(directory,'publication-site.json'),assets=path.join(directory,'publication-gui');
    fs.writeFileSync(siteFile,canonical({site_label:'首次配对发布联调',service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,
@@ -423,7 +472,8 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
    let identity=await refresh();
    const grant=await seamer('localGrant',{handle_id:identity,principal_id:issued.principal_id});
    await seamer('replaceLocalGrant',{handle_id:identity,request:{request_id:id(),principal_id:issued.principal_id,principal_kind:'human',expected_revision:grant.revision,
-    permissions:[...new Set([...grant.permissions,'request.create','request.read','definition.read','definition.edit','definition.publish','run.approve','run.arm','run.manage','run.read'])],
+    permissions:[...new Set([...grant.permissions,'request.create','request.read','definition.read','definition.edit','definition.publish','run.approve','run.arm','run.manage','run.read',
+     ...(scheduledAdmission?['schedule.read','schedule.publish','schedule.activate']:[])])],
     definition_scope:grant.definition_scope,not_before_ns:grant.not_before_ns,expires_ns:grant.expires_ns}});
    identity=await refresh();
    const context=await seamer('createDraftContext',identity),draft=await seamer('createDraft',{handle_id:identity,context_id:context.context_id,key:id()});
@@ -575,6 +625,10 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
     const retained=await seamer('localSourceEvent',priorMatchSet.lookup);
     assert.deepEqual(retained.trigger_match_set,priorMatchSet.match);
     assert.deepEqual(retained.trigger_decision_set,priorMatchSet.decision);
+    if(scheduledAdmission){
+     await verifyScheduledAdmission({seamer,frames,origin:second.apiOrigin,ca:materials.ca,bearer,armed,grantRef,program,refresh});
+     await controller('finish');return;
+    }
     if(armedDispatch){
      let publishedSource;
      try{publishedSource=await controller('publishArmedEvent');}

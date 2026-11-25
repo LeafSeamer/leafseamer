@@ -142,7 +142,7 @@ async function initialize(input,native=null){
   seamerInitial=input;
   seamerDirectory=directory;seamerIssuer=issuer;
   if(!native){harness.after(()=>{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));fs.rmSync(directory,{recursive:true,force:true,maxRetries:5,retryDelay:50});});initializeStorage(directory);}
-  const service=migrateStorage(directory,input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
+  const service=migrateStorage(directory,input.scheduledAdmission?'39':input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
   // 双端测试授时装配有固定时代偏移，年龄上限只用于这份临时安装批准。
   const agePolicy=input.executionSource?{event_age_limits:[{...input.executionSource,capture_semantics:'event_occurrence',max_age_ms:90000}],max_condition_nodes:64}:null;
   publication=publicationMaterial({authority_service_id:service.service_id,database_instance_id:service.database_instance_id},
@@ -188,7 +188,7 @@ async function initialize(input,native=null){
    publicationPolicyFactory,...(native?{supervisedReference:native.supervision,referenceSamplingAuthority:native.samplingAuthority}:
     receiverReference&&{referenceTimeProvider:receiverReferenceFixture}),
    publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,
-    localSourceSubscriptions:input.managedSubscriptions===true,onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
+    localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
    const descriptor_digest=digest({scope,provider:'test Seamer process domain'});
    const clock_domain_id=eventApprovals?'clock_'+descriptor_digest.slice(7):id();
    return fixture(scope,{source,descriptor:supervisedDomain??{clock_domain_id,descriptor_digest}},{sampleWindowPolicy:'authentication-clock-sample/2'}).provider;
@@ -440,6 +440,12 @@ async function execute(command,value){
   const identity=()=>app.pairing.identityReceiver.prepare(value.identity_request);
   const context=app.authorization.createArmRunContext(await identity(),{ttl_ms:30000,max_unique_requests:1});
   const requestContext={context_id:context.context_id,idempotency_key:id()};
+  if(seamerInitial.scheduledAdmission){
+   const actor=await identity();
+   const issued=await app.runs.observeAndArmRun(actor,value.run_id,{context:requestContext,expected_run_revision:value.revision});
+   const recorded=app.runs.getArmPreflight(await identity(),issued.operation.preflight_ref);
+   return {recorded,issued,expiredPreflight:null};
+  }
   let expiredPreflight=null;
   for(;;){
    const recorded=await app.runs.recordArmPreflight(await identity(),value.run_id,value.revision);
