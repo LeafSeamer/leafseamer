@@ -389,4 +389,6 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 Schema 38 支持原子受理记录。受理事务将场次、激活修订、排期版本、发布制品及首步时间证据与执行封存绑定，并占用同一自动化活动槽。已受理的场次在 `occurrences` 中显示为 `accepted`，改期后仍可查回固定的执行与版本。
 
+供配对 Controller 读取的定时动作证据采用 `leafseamer-action-binding/2` 响应。新受理原件固定场次摘要和步骤窗口索引摘要。动作绑定从受理时的排期版本提取指定步骤的窗口，其它步骤只提供索引中的身份与摘要。
+
 首步的可信 UTC 区间完全进入有效窗口时，当前激活版本的 `occurrences` 可附带 `qualification`。投影检查已布防运行、发布制品、规则分支和首步守卫及参数。定时选支只采用当时可证明的条件，依赖未取得的来源值时保留未知。 `ready_for_preparation` 表示可以开始核验派发所需资格。扫描发现窗口内的活动槽已占用时，将场次持久记为 `blocked`，原因为 `run_busy`。自动消费、逐步派发和设备执行仍需接入。

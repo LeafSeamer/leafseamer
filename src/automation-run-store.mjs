@@ -707,7 +707,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
      same(request.preparation,{lookup:grant.lookup,grant_ref:grant.grant_ref,receipt_ref:grant.receipt_ref}),'execution_action_peer');
     const eligible_before_ns=step.prepared_parameters.body.eligible_before_ns;
     executions.assertActionWindow(value,step,currentSample(),eligible_before_ns);
-    return {execution:value.execution,step_plan:step.plan,step_ready:step.ready,parameters:step.prepared_parameters,eligible_before_ns};
+    return {execution:value.execution,step_plan:step.plan,step_ready:step.ready,parameters:step.prepared_parameters,eligible_before_ns,
+     ...(value.execution.origin_kind==='schedule'&&{schedule:schedules.readActionScheduleInTransaction(value.execution,step.plan)})};
    });
    const body=verify();
    let current=true;

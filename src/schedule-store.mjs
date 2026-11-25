@@ -14,6 +14,7 @@ const put=result=>need(result.changes===1,'storage');
 const calendarProfile={format:'leafseamer.calendar-fixed-offset/1',calendar:'iso8601',time_scale:'posix-utc',precision:'milliseconds'};
 const calendarRef=freeze(ref('calendar.fixed-offset','1',digest(calendarProfile)));
 const limit=86400000;
+const windowIndex=item=>item.step_windows.map(({step_id,step_window_digest})=>({step_id,step_window_digest}));
 
 function original(text,checksum){
  const value=JSON.parse(text);
@@ -145,6 +146,24 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
  }
  return Object.freeze({
   ...(admissions&&{timeForAdmissionInTransaction(source,sample){return freeze(timeFor(source,sample).time);},
+   readActionScheduleInTransaction(execution,step){
+    need(db.inTransaction&&execution.origin_kind==='schedule'&&same(execution.scope,scope),'admission_transaction');
+    const claim=execution.admission_ref,row=admissions.get(claim.object_id);
+    need(row&&row[1]===claim.digest,'admission_integrity');
+    const admission=original(...row),{schedule_id,occurrence_id}=admission;
+    const activated=readActivation(schedule_id,admission.activation_ref.revision),version=readVersion(schedule_id,admission.schedule_version_ref.revision);
+    need(activated&&version&&admission.execution_id===execution.execution_id&&admission.run_id===execution.run_id&&
+     same(admission.scope,scope)&&same(execution.artifact_ref,admission.artifact_ref)&&same(admission.artifact_ref,version.body.definition_artifact_ref)&&
+     same(activated.ref,admission.activation_ref)&&same(activated.body.schedule_version_ref,version.ref)&&
+     same(admission.schedule_version_ref,version.ref),'admission_integrity');
+    const occurrence=version.body.items.find(item=>item.occurrence_id===occurrence_id);
+    const window=occurrence?.step_windows.find(window=>window.step_id===step.step_id);
+    need(occurrence&&admission.occurrence_plan_digest===digest(occurrence)&&window&&
+     window.action_binding_id===step.payload.binding.action_binding_ref.id,'admission_step_window');
+    const window_index=windowIndex(occurrence);
+    need(admission.step_window_index_digest===digest(window_index),'admission_integrity');
+    return freeze({admission,step_window:window,window_index});
+   },
    prepareAdmissionInTransaction(source,run,execution_id,steps,readClock){
    need(db.inTransaction&&typeof readClock==='function','admission_transaction');
    const {schedule_id,occurrence_id,activation_ref}=source;
@@ -157,7 +176,8 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
    need(first?.step.kind==='action'&&first.dependencies.length===0&&actions.every(({step,action})=>
     byStep.get(step.step_id)?.action_binding_id===action.action_binding_ref.id),'admission_steps');
    const body=freeze({format:'leafseamer.schedule-admission/1',scope,service_boot_id:bootId,occurrence_id,schedule_id,execution_id,
-    logical_key_digest:item.logical_key_digest,run_id:run.run_id,artifact_ref:run.artifact_ref,activation_ref:activation.ref,
+    logical_key_digest:item.logical_key_digest,occurrence_plan_digest:digest(item),step_window_index_digest:digest(windowIndex(item)),
+    run_id:run.run_id,artifact_ref:run.artifact_ref,activation_ref:activation.ref,
     schedule_version_ref:version.ref,...time});
    const text=canonical(body),checksum=digest(body);
    need(Buffer.byteLength(text)<=8192,'admission_capacity');

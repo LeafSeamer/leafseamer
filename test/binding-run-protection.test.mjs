@@ -466,7 +466,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   const control={control_ref:{id:id(),revision:'1',digest:digest('device control original')},control_epoch:id(),effective_version:'0',
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
-  let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId;
+  let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
    publications:automationPublicationStore({db,service:{...f.identity,schema_revision},isOpen:()=>db.open}),eventAgePolicy:installed?.eventAgePolicy,
@@ -660,7 +660,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     assert.deepEqual(request,{lookup:intent.lookup,grant_ref:receipt.grant_ref,receipt_ref:ref('preparation_receipt',target,receipt.receipt_id,digest(receipt))});
     if(!eligible||executionGrantDenied||parameterCase==='grant'&&postCommitTick!==null)throw Error('test target no longer eligible');
     const body={request,state:'eligible',eligible_before_ns:String(epoch+250000000n)};return {body,beforeSend:()=>body};
-   }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runActionBinding:runs.prepareActionBindingForPeer})]);
+   }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runActionBinding(...args){
+    return scheduledActionRead?scheduledActionRead(...args):runs.prepareActionBindingForPeer(...args);
+   }})]);
    a.transport.bindPeers([b.describe()]);b.transport.bindPeers([a.describe()]);
    const ap={...a.transport.configuration,binding_id:id(),permissions:['automation.prepare.read']};
    const bp={...b.transport.configuration,binding_id:pairing.binding_id,permissions:['automation.prepare','automation.prepare.read','automation.protect']};
@@ -1193,6 +1195,52 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          const occurrenceView={occurrence_id:occurrence.occurrence_id,state:'accepted',admission:accepted.admission};
          assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
          assert.deepEqual(schedules.get(null,scheduleId,'1').occurrences,[occurrenceView,overlap]);
+         const step=execution.steps[0].plan,readSchedule=db.transaction(()=>schedules.readActionScheduleInTransaction(execution.execution,step));
+         assert.deepEqual(readSchedule(),{admission:accepted.admission,step_window:occurrence.step_windows[0],
+          window_index:occurrence.step_windows.map(({step_id,step_window_digest})=>({step_id,step_window_digest}))});
+         assert.throws(()=>db.transaction(()=>schedules.readActionScheduleInTransaction(execution.execution,{...step,step_id:'other'}))(),
+          {code:'schedule_admission_step_window'});
+         if(controllerActions){
+          const grant=execution.execution.grant_basis[0],eligible_before_ns=execution.execution.approved_before_ns;
+          // Readiness and parameter fixtures isolate the transport. The occurrence and execution are the committed Seamer originals.
+          const readyBody={format:'leafseamer.step-ready/1',ready_id:id(),execution_ref:execution.execution_ref,step_id:step.step_id,
+           step_plan_digest:digest(step)};
+          const step_ready={ref:ref('step_ready',scope,readyBody.ready_id,digest(readyBody)),body:readyBody};
+          const params={value:true},parametersBody={format:'leafseamer.action-parameters/1',execution_ref:execution.execution_ref,
+           step_id:step.step_id,step_plan_digest:digest(step),step_ready_ref:step_ready.ref,origin_digest:execution.execution.admission_ref.digest,
+           grant_ref:grant.grant_ref,parameter_schema_ref:step.payload.binding.parameter_schema_ref,delay_window_refs:[],
+           parameters:params,parameters_digest:digest(params),eligible_before_ns};
+          const parameters={ref:ref('action_parameters',scope,step.step_id,digest(parametersBody)),body:parametersBody};
+          const request={preparation:{lookup:grant.lookup,grant_ref:grant.grant_ref,receipt_ref:grant.receipt_ref},
+           execution_ref:execution.execution_ref,step_id:step.step_id,parameters_ref:parameters.ref};
+          const unsigned={execution:execution.execution,step_plan:step,step_ready,parameters,eligible_before_ns};
+          scheduledActionRead=(bindingId,socket,query)=>{
+           assert.equal(bindingId,pairing.binding_id);assert.equal(socket.authorized,true);assert.deepEqual(query,request);
+           const read=()=>({...unsigned,schedule:readSchedule()});
+           return {body:read(),beforeSend:read};
+          };
+          const received=await observeActionBinding(request);
+          assert.equal(db.transaction(received.assertCurrentInTransaction).immediate(),true);
+          assert.deepEqual(received.original.schedule,readSchedule());
+          const checked=controllerActions.actionAdmissionRequest(request,target);
+          const adopted=controllerActions.actionAdmissionBinding(received.original,checked,observedActionPreparation);
+          const window=occurrence.step_windows[0];
+          assert.deepEqual(adopted.schedule_binding,{format:'leafseamer.schedule-step-binding/1',execution_ref:execution.execution_ref,
+           occurrence_ref:{id:occurrence.occurrence_id,revision:'1',digest:digest(occurrence)},
+           admission_ref:{id:occurrence.occurrence_id,revision:'1',digest:digest(accepted.admission)},
+           definition_artifact_ref:{id:published.artifact_ref.object_id,revision:published.artifact_ref.revision,digest:published.artifact_ref.digest},
+           schedule_version:'1',activation_ref:activation.ref,step_id:step.step_id,
+           step_window_ref:{id:window.step_window_id,revision:'1',digest:window.step_window_digest},window:window.window});
+          const tampered=structuredClone(received.original),{step_window_digest,...changed}=tampered.schedule.step_window;
+          changed.window.not_after_utc_ns=String(BigInt(changed.window.not_after_utc_ns)+1000000n);
+          tampered.schedule.step_window={...changed,step_window_digest:digest(changed)};
+          assert.throws(()=>controllerActions.actionAdmissionBinding(tampered,checked,observedActionPreparation),{code:'peer_pairing_action_schedule_step'});
+          tampered.schedule.window_index[0].step_window_digest=digest(changed);
+          assert.throws(()=>controllerActions.actionAdmissionBinding(tampered,checked,observedActionPreparation),{code:'peer_pairing_action_schedule_occurrence'});
+          const old=structuredClone(received.original);delete old.schedule;
+          assert.throws(()=>controllerActions.actionAdmissionBinding(old,checked,observedActionPreparation),{code:'peer_pairing_input'});
+          scheduledActionRead=null;
+         }
          assert.equal(commandSubmits,1);
          assert.deepEqual(db.pragma('foreign_key_check'),[]);
          inspect(f.dir,reopened=>{
