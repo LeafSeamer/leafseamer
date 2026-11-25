@@ -85,7 +85,7 @@ function failure(error){
  if(['schedule_request','schedule_item','schedule_step','schedule_window','schedule_local_time','schedule_offset','schedule_utc_range'].includes(code))return [422,'INVALID_REQUEST'];
  if(code==='schedule_capacity')return [429,'CAPACITY_EXCEEDED'];
  if(['local_authorization_request','local_authorization_operations','draft_duplicate_selection','automation_schema','binding_approval_request','run_request'].includes(code))return [422,'INVALID_REQUEST'];
- if(error?.name==='ClockError'||code==='peer_identity_expired')return [503,'CLOCK_UNTRUSTED'];
+ if(error?.name==='ClockError'||code==='peer_identity_expired'||code==='schedule_replacement_reference')return [503,'CLOCK_UNTRUSTED'];
  return [503,'WORKER_NOT_READY'];
 }
 export function assertProtectedDraftAddress(host,port){
@@ -94,7 +94,7 @@ export function assertProtectedDraftAddress(host,port){
   !Number.isInteger(port)||port<1||port>65535)fail('protected_ingress_address');
 }
 // 草稿及发布入口共用固定配对身份，发布采用本监听独立的 context/令牌/origin 绑定 CSRF。
-export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,localRunArm=false,localSchedules=null,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
+export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId,service,bootId,receiver,authorization,drafts,publications=null,runs=null,bindingApprovals=null,allowedOrigins=[],localPermissions=false,localEventBindings=false,localRunApprovals=false,localRunArm=false,localSchedules=null,scheduleClock=null,sourceSubscriptions=null,onFailure=null,protectedIngress=false,pairedIngress=false}){
  if(protectedIngress||pairedIngress){
   assertProtectedDraftAddress(host,port);
   if(localPermissions||localEventBindings||localRunApprovals||localRunArm||localSchedules||sourceSubscriptions||protectedIngress&&(pairedIngress||bindingId!==undefined||receiver||authorization)||
@@ -161,7 +161,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     return authorization.createScheduleContext(handle,operation_id,options);
    }
    case 'publish':return localSchedules.publish(handle,request.schedule_id,request.version);
-   case 'activate':return localSchedules.activate(handle,request.schedule_id,request.activation);
+   case 'activate':return localSchedules.activate(handle,request.schedule_id,request.activation,scheduleClock);
    case 'get':return localSchedules.get(handle,request.schedule_id,request.version);
    default:fail('local_authorization_request');
   }

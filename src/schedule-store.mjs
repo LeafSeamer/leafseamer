@@ -161,7 +161,7 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
     return {body,ref:ref(scheduleId,version,checksum)};
    }));
   },
-  activate(authentication,scheduleId,value){
+  activate(authentication,scheduleId,value,readClock=null){
    const input=structuredClone(value);
    need(fields(input,'context,expected_revision,schedule_version_ref')&&nullableRevision(input.expected_revision)&&id(scheduleId)&&
     fields(input.schedule_version_ref,'digest,id,revision')&&input.schedule_version_ref.id===scheduleId&&revision(input.schedule_version_ref.revision),'request');
@@ -169,11 +169,15 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
     const version=readVersion(scheduleId,input.schedule_version_ref.revision),prior=readActivation(scheduleId);
     need((prior?.body.revision??null)===input.expected_revision,'activation_conflict');
     need(version&&same(version.ref,input.schedule_version_ref),'version');
+    const sample=clock&&readClock?readClock():null;
+    if(clock&&prior)clock.advance(prior,readVersion(scheduleId,prior.body.schedule_version_ref.revision),sample,{replacing:true});
     const body={format:'leafseamer.schedule-activation/1',scope,activation_id:randomUUID(),schedule_id:scheduleId,revision:next(prior?.body.revision),
      schedule_version_ref:version.ref,prior_ref:prior?.ref??null,authorization:proof};
     const checksum=digest(body);
     put(db.prepare('INSERT INTO schedule_activation VALUES(?,?,?,?,?)').run(scheduleId,pad(body.revision),pad(version.ref.revision),canonical(body),checksum));
-    return {body,ref:ref(body.activation_id,body.revision,checksum)};
+    const activation={body,ref:ref(body.activation_id,body.revision,checksum)};
+    if(clock&&sample)clock.advance(activation,version,sample);
+    return activation;
    }));
   },
   get(authentication,scheduleId,version=null){

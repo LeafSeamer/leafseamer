@@ -372,7 +372,7 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 ### 本机排期
 
-显式迁移至 Schema 36 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
+显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
 
 | 操作 | 请求 |
 | --- | --- |
@@ -383,4 +383,6 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 单次项包含稳定的 `item_id`、`one_shot_key`、带毫秒的 `local_start`、显式 `±HH:MM` 偏移，以及每个动作步骤的 `step_id`、`role`、`start_offset_ms` 和 `latest_start_offset_ms`。同项改期沿用原场次身份。发布与激活分别需要人员的 `schedule.publish` 和 `schedule.activate` 权限及近期认证，读取要求 `schedule.read`。排期激活和运行布防是独立操作。
 
-Schema 37 的排期读取增加 `occurrences` 时间保护状态。配置受监督的业务参考时间后，Seamer 在窗口开始前保存最早可能到点的单调时刻。同一次激活后，新的授时样本只能维持或提前该时刻。失信跨过边界会持久登记 `blocked`，已过步骤窗口则登记 `missed`。两种结果均按逻辑场次保留，`tracking` 只表示已登记时间边界，执行受理另行裁决。
+排期读取通过 `occurrences` 返回时间保护状态。配置受监督的业务参考时间后，Seamer 在窗口开始前保存最早可能到点的单调时刻。同一次激活后，新的授时样本只能维持或提前该时刻。失信跨过边界会持久登记 `blocked`，已过步骤窗口则登记 `missed`。两种结果均按逻辑场次保留，`tracking` 只表示已登记时间边界，执行受理另行裁决。
+
+替换激活时，Seamer 在同一事务内核对旧场次并检查新版本。旧场次已到最早可能开始时刻时，保护结果随逻辑场次保留，即使新版本将该项移除，之后再加入也沿用原结果。若旧场次尚未终结且缺少可信参考时间，接口返回 `503 CLOCK_UNTRUSTED`，原激活继续有效。

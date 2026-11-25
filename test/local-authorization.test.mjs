@@ -239,13 +239,15 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  const actor=f.handle(f.principal,scopes),restricted=f.handle(f.principal,scopes.filter(value=>value!=='schedule.activate'));
  const certs=peerCertificates(),fullToken='v1.'+id()+'.'+'A'.repeat(43),restrictedToken='v1.'+id()+'.'+'B'.repeat(43);
  const handles=new Map([[fullToken,actor],[restrictedToken,restricted]]),diagnostic=[];
- const authorization={...f.auth,createScheduleContext(...args){
+ const createScheduleContext=(...args)=>{
   const result=f.auth.createScheduleContext(...args);f.advance(1000000n);return result;
- }};
- const app=await startDraftHttp({cert:certs.leaves[0].cert,key:certs.leaves[0].key,bindingId:id(),service:f.store.identity,bootId:f.store.serviceBootId,
-  receiver:{async prepare({token}){return handles.get(token);}},authorization,drafts:f.store.drafts,publications:f.store.publications,runs:f.store.runs,
-  localSchedules:f.store.schedules,onFailure(value){diagnostic.push(value);}});
- t.after(()=>app.close());
+ };
+ let clockSample=null;
+ const openApp=()=>startDraftHttp({cert:certs.leaves[0].cert,key:certs.leaves[0].key,bindingId:id(),service:f.store.identity,bootId:f.store.serviceBootId,
+  receiver:{async prepare({token}){return handles.get(token);}},authorization:{...f.auth,createScheduleContext},drafts:f.store.drafts,publications:f.store.publications,runs:f.store.runs,
+  localSchedules:f.store.schedules,scheduleClock:()=>clockSample,onFailure(value){diagnostic.push(value);}});
+ let app=await openApp();
+ t.after(()=>app?.close());
  const scheduleId=id(),post=(operation,request,token=fullToken)=>new Promise((resolve,reject)=>{
   const body=Buffer.from(canonicalize({operation,request}));
   const req=https.request(new URL('/auth/local-schedules/v1',app.origin),{method:'POST',headers:{
@@ -276,7 +278,7 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  assert.equal((await post('create-context',{operation_id:'activateSchedule',ttl_ms:30000,max_unique_requests:1},restrictedToken)).status,403);
  const activateContext=await issued('activateSchedule');
  const activation={context:{context_id:activateContext,idempotency_key:id()},expected_revision:null,schedule_version_ref:first.body.result.ref};
- const activate=(input=activation)=>post('activate',{schedule_id:scheduleId,activation:input});
+ const activate=(input=activation,schedule_id=scheduleId)=>post('activate',{schedule_id,activation:input});
  assert.equal((await activate()).status,200);
  const moved={...input,context:{...input.context,idempotency_key:id()},expected_version:'1',items:[
   {...item,local_start:'2026-11-26T19:00:00.000'},{...item,item_id:'expired',local_start:'2026-11-24T19:00:00.000'}]};
@@ -291,6 +293,7 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  assert.deepEqual(results.map(result=>result.status).sort(),[200,409]);
  assert.deepEqual((await get()).body.result.activation.body.schedule_version_ref,second.body.result.ref);
  assert.equal((await publish({...moved,context:{...moved.context,idempotency_key:id()},expected_version:'2',items:[{...item,one_shot_key:'new'}]})).status,409);
+ await app.close();app=null;
  f.close();
  const db=new Database(path.join(f.dir,'seamer.sqlite'),{readonly:true});
  try{
@@ -302,11 +305,13 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  assert.equal(migrateStorage(f.dir,'37').service_id,f.service.service_id);
  f.open();
  let reader=f.handle(f.principal,scopes);
+ handles.set(fullToken,reader);
+ app=await openApp();
  const schedules=()=>f.store.schedules,occurrence=second.body.result.body.items[0];
  const stepStart=BigInt(occurrence.step_windows[0].window.not_before_utc_ns);
  const domain={clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:'sha256:'+'2'.repeat(64)};
  const status=()=>schedules().get(reader,scheduleId).occurrences[0];
- function drive(tick,value=null){
+ function sample(tick,value=null){
   const clock={tick_ns:String(tick),domain};
   let reference=null;
   if(value!==null){
@@ -317,8 +322,9 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
      policy:{max_half_width_ns:'25',max_anchor_age_ns:'20000',max_exchange_age_ns:'20000',max_upstream_age_ns:'20000'},
      error:{upstream_age_upper_at_m1_ns:'0'}}};
   }
-  schedules().reconcileClock(()=>({clock,reference}));
+  return {clock,reference};
  }
+ const drive=(tick,value)=>schedules().reconcileClock(()=>sample(tick,value));
  assert.equal(status().state,'awaiting_reference');
  drive(50n,stepStart-101n);
  assert.equal(status().window_enter_tick_ns,'100');
@@ -334,7 +340,46 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  const stopped=status();assert.equal(stopped.state,'blocked');assert.equal(stopped.stop.reason,'reference_time_lost');
  assert.deepEqual(stopped.stop.boundary_ref,boundary);
  drive(101n,stepStart-101n);assert.deepEqual(status(),stopped);
+ const raceId=id(),contextFor=context_id=>({context_id,idempotency_key:id()});
+ const rp=await issued('publishSchedule'),ra=await issued('activateSchedule');
+ const earlyVersion=await publish({...input,context:contextFor(rp)},raceId);
+ assert.equal(earlyVersion.status,200);
+ const early={context:contextFor(ra),expected_revision:null,schedule_version_ref:earlyVersion.body.result.ref};
+ clockSample=sample(200n,stepStart-86400000000000n-1000n);
+ assert.equal((await activate(early,raceId)).status,200);
+ clockSample=sample(300n,stepStart-86400000000000n-1000n);
+ const beforeEntry=await activate({...early,context:contextFor(ra),expected_revision:'1'},raceId);
+ assert.equal(beforeEntry.status,200,JSON.stringify(diagnostic));
+ assert.equal(beforeEntry.body.result.ref.revision,'2');
+ const replacementVersion=await publish({...moved,context:contextFor(rp),items:[moved.items[1]]},raceId);
+ assert.equal(replacementVersion.status,200);
+ const replace={context:contextFor(ra),expected_revision:'2',schedule_version_ref:replacementVersion.body.result.ref};
+ const getRace=version=>post('get',{schedule_id:raceId,version});
+ const firstClock=(await getRace('1')).body.result.occurrences[0];
+ assert.equal(firstClock.state,'tracking');
+ clockSample=null;
+ const unavailable=await activate(replace,raceId);
+ assert.equal(unavailable.status,503);
+ assert.equal(unavailable.body.error,'CLOCK_UNTRUSTED');
+ assert.equal((await getRace('1')).body.result.activation.ref.revision,'2');
+ // The periodic scan has not seen this tick. The replacement itself must
+ // record the previous window crossing even though it removes that item.
+ clockSample=sample(1000n,stepStart-86400000000000n-1000n);
+ const replaced=await activate(replace,raceId);
+ assert.equal(replaced.status,200,JSON.stringify(diagnostic));
+ const protectedOccurrence=(await getRace('1')).body.result.occurrences[0];
+ assert.equal(protectedOccurrence.state,'blocked');
+ assert.equal(protectedOccurrence.stop.reason,'previous_window_entered');
+ assert.deepEqual(protectedOccurrence.stop.boundary_ref,firstClock.boundary_ref);
+ clockSample=null;
+ assert.deepEqual(await activate(replace,raceId),replaced);
+ const reintroduced=await publish({...moved,context:contextFor(rp),expected_version:'2',items:[moved.items[0]]},raceId);
+ assert.equal(reintroduced.status,200);
+ clockSample=sample(1010n,stepStart-86400000000000n-1000n);
+ assert.equal((await activate({...replace,context:contextFor(ra),expected_revision:'3',schedule_version_ref:reintroduced.body.result.ref},raceId)).status,200);
+ assert.deepEqual((await getRace('3')).body.result.occurrences[0],protectedOccurrence);
  f.close();f.open();reader=f.handle(f.principal,scopes);
  assert.deepEqual(status(),stopped);
  assert.equal(elapsed().state,'missed');
+ assert.deepEqual(schedules().get(reader,raceId).occurrences[0],protectedOccurrence);
 });

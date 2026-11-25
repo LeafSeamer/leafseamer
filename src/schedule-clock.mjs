@@ -5,7 +5,7 @@ const maxTick=(1n<<64n)-1n;
 const pad=value=>String(value).padStart(20,'0');
 const ceil=(value,divisor)=>(value+divisor-1n)/divisor;
 const minimum=(...items)=>items.reduce((a,b)=>a<b?a:b);
-const need=ok=>{if(!ok)throw new Error('schedule_clock_integrity');};
+const need=(ok,code='schedule_clock_integrity')=>{if(!ok)throw Object.assign(new Error(code),{code});};
 const put=result=>need(result.changes===1);
 const reference=(id,digest)=>({id,revision:'1',digest});
 function original(text,checksum){
@@ -68,12 +68,15 @@ export function scheduleClockStore(db,scope,boot){
   });
  }
  return Object.freeze({
-  advance(activation,version,sample){
+  advance(activation,version,sample,{replacing=false}={}){
    need(db.inTransaction&&same(activation.body.schedule_version_ref,version.ref));
    const proof=qualify(sample,scope,boot),clock=sample?.clock??null;
    const revision=pad(activation.ref.revision),now=clock?BigInt(clock.tick_ns):null;
    for(const item of version.body.items){
     if(db.prepare('SELECT 1 FROM schedule_occurrence_stop WHERE occurrence_id=?').pluck().get(item.occurrence_id))continue;
+    // An activation can remove the item from subsequent scans. Keep the old
+    // version active if this transaction cannot establish where its window stands.
+    need(!replacing||proof,'schedule_replacement_reference');
     const prior=clockRecord(item.occurrence_id),step=firstWindow(item);
     const stop=(state,reason)=>finalize(item,activation,step,prior,clock,state,reason);
     if(prior&&(!clock||prior.body.service_boot_id!==boot||!same(prior.body.domain,clock.domain)||now<prior.observed)){
@@ -93,6 +96,7 @@ export function scheduleClockStore(db,scope,boot){
      if(proof.lower>=end){stop('missed','step_window_elapsed');continue;}
      const fixed=minimum(prior.enter,enter);
      if(now>=fixed&&(prior.fault||now>=prior.before)){stop('blocked','reference_time_lost');continue;}
+     if(replacing&&now>=fixed){stop('blocked','previous_window_entered');continue;}
      put(db.prepare(`UPDATE schedule_occurrence_clock SET window_enter_tick=?,observed_tick=?,qualified_before_tick=?,fault=0
        WHERE occurrence_id=? AND activation_revision=?`).run(pad(fixed),pad(now),pad(proof.before),item.occurrence_id,revision));
      continue;
