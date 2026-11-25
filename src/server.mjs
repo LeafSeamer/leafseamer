@@ -114,8 +114,12 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
     clock_domain_ref:linuxRuntime.binding.receipt.domain_ref,provider_pid:linuxReference.provider.process_observation.provider_pid});
    if(installedCapture)sampling=await storage.openReferenceSampling({binding:linuxBinding,collector:linuxCollector,authentication,authority:installedCapture,
     archiveOnly:installedCapture.referenceAuthority===undefined,
-    supervision:{assertCurrent:linuxReference.assertCurrent,observeTimeProviderRetirement:()=>null,
-     assertTimeProviderRetirement(){throw new Error('time_provider_poll_retirement_unavailable');}}});
+    supervision:{assertCurrent:linuxReference.assertCurrent,
+     observeTimeProviderRetirement:original=>linuxReference.observeRetirement?.(original,source.tick)??null,
+     assertTimeProviderRetirement(observed){
+      if(!linuxReference.assertRetirement)throw new Error('time_provider_poll_retirement_unavailable');
+      linuxReference.assertRetirement(observed);
+     }}});
   }
   if(armAdmissionApproval!==null){
    fields(armAdmissionApproval,['approval_file','approval_sha256']);
