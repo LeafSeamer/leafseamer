@@ -19,7 +19,8 @@ export function openReferenceSampling({db,identity,bootId,binding,supervision,co
  };
  assertCurrent();
  const polls=timeProviderPollStore(db,bootId,binding,{limits,readSource:slot=>readSource(slot,authentication),readAuthentication:authentication.referenceTimeSample,assertCurrent,
-  observeRetirement:supervision.observeTimeProviderRetirement,assertRetirement:supervision.assertTimeProviderRetirement},true,true,true);
+  observeRetirement:supervision.observeTimeProviderRetirement,assertRetirement:supervision.assertTimeProviderRetirement,
+  allowSourceReplacement:supervision.allowSourceReplacement===true&&Number(identity.schema_revision)>=35},true,true,true);
  const anchors=archiveOnly?null:referenceTimeAnchorStore(db,bootId,binding,{...referenceAuthority,sourceSlot,readContext:polls.referenceContext});
  const archive=timeProviderCaptureStore(db,identity,captureProtection,anchors);
  const scheduler=referenceTimeScheduler({sourceSlots:[sourceSlot]},{plan:polls.schedulePlan,recover:polls.recover,

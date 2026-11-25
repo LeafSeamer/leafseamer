@@ -115,6 +115,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    if(installedCapture)sampling=await storage.openReferenceSampling({binding:linuxBinding,collector:linuxCollector,authentication,authority:installedCapture,
     archiveOnly:installedCapture.referenceAuthority===undefined,
     supervision:{assertCurrent:linuxReference.assertCurrent,
+     allowSourceReplacement:typeof linuxReference.observeRetirement==='function',
      observeTimeProviderRetirement:original=>linuxReference.observeRetirement?.(original,source.tick)??null,
      assertTimeProviderRetirement(observed){
       if(!linuxReference.assertRetirement)throw new Error('time_provider_poll_retirement_unavailable');
