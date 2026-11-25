@@ -23,7 +23,7 @@ function requestHttps(origin,ca,{method,target,headers,body,credential}){
   req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('acceptance_https_timeout')));req.end(body);
  });
 }
-async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh,dispatch}){
+async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh,dispatch,withdrawReference}){
  async function request(operation,input){
   const body=Buffer.from(canonical({operation,request:input}));
   const response=await requestHttps(origin,ca,{target:'/auth/local-schedules/v1',method:'POST',body,
@@ -65,21 +65,40 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
  let terminal=null;
  if(dispatch){
   const deadline=performance.now()+20000;
-  let settled;
+  let settled,failed;
   do{
    const failure=frames.find(f=>f.event==='automation-target-failed');
+   if(withdrawReference&&failure){
+    const withdrawal=frames.find(f=>f.event==='scheduled-reference-withdrawn');
+    const stages=frames.filter(f=>['automation-target-stage','automation-target-stage-failed'].includes(f.event))
+     .map(({stage,present,disposition,code})=>({stage,present,disposition,code}));
+    assert.equal(withdrawal?.command_id,accepted.reference.object_id,JSON.stringify({failure,stages}));
+    assert.deepEqual(failure.reference,accepted.reference);
+    failed=failure;
+    break;
+   }
    assert.equal(failure,undefined,JSON.stringify({failure,stages:frames.filter(f=>f.event.startsWith('automation-target-'))
     .map(({event,stage,present,disposition,code,cause,constraint,reported_ms,remaining_ms})=>({event,stage,present,disposition,code,cause,constraint,reported_ms,remaining_ms}))}));
    settled=frames.find(f=>f.event==='automation-target-settled');
    if(settled)break;
    await delay(25);
   }while(performance.now()<deadline);
-  assert.deepEqual(settled?.reference,accepted.reference,'Scheduled command did not settle in Controller');
+  if(withdrawReference)assert.ok(failed&&!settled,'Controller did not refuse the write after reference withdrawal');
+  else assert.deepEqual(settled?.reference,accepted.reference,'Scheduled command did not settle in Controller');
   const adoptionDeadline=performance.now()+12000;
   do{
    const current=await seamer('nativeTriggerExecution',{identity:await refresh(),execution_id:admission.execution_id});
    const submitted=current.steps[0].submission;
+   if(withdrawReference&&submitted?.terminal){
+    assert.deepEqual(submitted.adjudication.command_ref,accepted.reference);
+    assert.equal(submitted.terminal.state.outcome,'blocked');
+    assert.equal(submitted.terminal.state.reason_code,'execution_closed');
+    assert.equal(current.completion,null);
+    terminal=submitted.terminal;
+    break;
+   }
    if(current.completion){
+    assert.equal(withdrawReference,false,'A withdrawn scheduled command completed');
     assert.deepEqual(submitted.adjudication.command_ref,accepted.reference);
     assert.equal(submitted.terminal.state.outcome,'succeeded');
     assert.equal(submitted.terminal.completion_achieved,'effect_verified');
@@ -87,14 +106,19 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
     terminal=submitted.terminal;
     break;
    }
-   assert.equal(current.protection,null,JSON.stringify({protection:current.protection,state:submitted?.state}));
+   if(!withdrawReference)assert.equal(current.protection,null,JSON.stringify({protection:current.protection,state:submitted?.state}));
    await delay(200);
   }while(performance.now()<adoptionDeadline);
   assert.ok(terminal,'Scheduled execution did not consume the Controller terminal receipt');
   const finished=await seamer('getRun',{identity:await refresh(),run_id:armed.run_id});
-  assert.equal(finished.lifecycle,'armed');
-  assert.equal(finished.active_execution_id,null);
-  assert.equal(finished.last_execution_id,admission.execution_id);
+  if(withdrawReference){
+   assert.equal(finished.lifecycle,'paused');
+   assert.equal(finished.active_execution_id,admission.execution_id);
+  }else{
+   assert.equal(finished.lifecycle,'armed');
+   assert.equal(finished.active_execution_id,null);
+   assert.equal(finished.last_execution_id,admission.execution_id);
+  }
  }
  const execution=await seamer('nativeTriggerExecution',{identity:await refresh(),execution_id:admission.execution_id});
  assert.equal(execution.execution.origin_kind,'schedule');
@@ -555,7 +579,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
    const publishRequest=await seamer('prepareEventPublication',{identity:await refresh(),definition_id,event:candidate.binding,action,
     context_id:publicationContext.body.data.context_id});
    const publishedHttp=await client.call('publishDefinition',{path:{definition_id},body:publishRequest});
-   assert.equal(publishedHttp.status,'201');const published=publishedHttp.body;
+   assert.equal(publishedHttp.status,'201',JSON.stringify(publishedHttp.body));const published=publishedHttp.body;
    const readProgram=identity=>seamer('readPublishedEventProgram',{identity,definition_id,version:published.definition_version});
    const program=await readProgram(await refresh());
    assert.deepEqual(program.input_bindings,[input]);assert.deepEqual(program.action_bindings,[action.value]);
@@ -660,7 +684,8 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
     assert.deepEqual(retained.trigger_match_set,priorMatchSet.match);
     assert.deepEqual(retained.trigger_decision_set,priorMatchSet.decision);
     if(scheduledAdmission){
-     await verifyScheduledAdmission({seamer,frames,origin:second.apiOrigin,ca:materials.ca,bearer,armed,grantRef,program,refresh,dispatch:config.scheduled_dispatch===true});
+     await verifyScheduledAdmission({seamer,frames,origin:second.apiOrigin,ca:materials.ca,bearer,armed,grantRef,program,refresh,
+      dispatch:config.scheduled_dispatch===true,withdrawReference:config.scheduled_reference_withdrawal===true});
      await controller('finish');return;
     }
     if(armedDispatch){
