@@ -239,11 +239,39 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    need(BigInt(inputs.grants.length)<=BigInt(inputs.operation.budget.required.work_units),'execution_grant_capacity');
    return inputs.grants.map(value=>({runId:id,...value}));
   }));
+  return observeExecutionGrants(captured);
+ }
+ async function observeExecutionGrants(captured){
   const observed=await inBatches(captured,async item=>{
-   try{return await observeArmPreparation(item.pairing_ref.id,structuredClone(item.request));}
-   catch{return null;}
+   const request={...item.request,...(item.schedule_device_ids&&{schedule_device_ids:item.schedule_device_ids})};
+   let reply;
+   try{reply=await observeArmPreparation(item.pairing_ref.id,structuredClone(request));}
+   catch{reply=null;}
+   return {item,request,reply};
   });
-  return new Map(captured.map((item,index)=>[item.request.lookup.preparation_id,{item,reply:observed[index]}]));
+  return new Map(observed.map(result=>[result.request.lookup.preparation_id,result]));
+ }
+ function executionActions(run,publication,steps,preflight,grants){
+  const ids=new Set(steps.filter(({step})=>step.kind==='action').map(({step})=>step.action_binding_id));
+  const deps=publication.dependencies.actions.filter(({binding_id})=>ids.has(binding_id));
+  need(deps.length===ids.size,'execution_plan_binding');
+  const bindings=deps.length?resolveDeviceActionsInTransaction(run.definition_id,deps):[];
+  need(bindings.length===deps.length,'execution_plan_binding');
+  return bindings.map((binding,index)=>{
+   const dep=deps[index];
+   need(binding.binding_id===dep.binding_id&&preflight.basis.device_bindings.some(value=>same(value,binding)),'execution_plan_binding');
+   const grant=grants.find(item=>same(item.request.lookup.controller_scope,binding.controller_scope));
+   need(grant&&grant.grant.device_actions.some(value=>same(value,binding.device_action)),'execution_plan_grant');
+   return {dep,binding,grant};
+  });
+ }
+ function scheduledGrantDevices(targets){
+  const groups=new Map();
+  for(const {binding,grant} of targets){
+   if(!groups.has(grant))groups.set(grant,new Set());
+   groups.get(grant).add(binding.device_action.device_id);
+  }
+  return new Map([...groups].map(([grant,ids])=>[grant,[...ids].sort(compare)]));
  }
  function planExecution(run,publication,approval,selectedBranch,prepared){
   if(!executions)return null;
@@ -252,24 +280,19 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    same(operation.approval_ref,approval.approval_ref),'execution_slot_changed');
   arm.assertPolicy(preflight.observation,preflight.basis);
   const steps=selectedExecutionSteps(publication.compiled,run,selectedBranch);
-  const actionIds=new Set(steps.filter(item=>item.step.kind==='action').map(item=>item.step.action_binding_id));
-  const deps=publication.dependencies.actions.filter(action=>actionIds.has(action.binding_id));
-  need(deps.length===actionIds.size,'execution_plan_binding');
-  const bindings=deps.length?resolveDeviceActionsInTransaction(run.definition_id,deps):[];
-  need(bindings.length===deps.length,'execution_plan_binding');
+  const targets=executionActions(run,publication,steps,preflight,grants);
+  const scheduled=prepared.requireScheduled?scheduledGrantDevices(targets):null;
   const grantBasis=new Map(),actions=new Map(),recheckGrants=[];
   let deadline=proposalWindowEnd(approval.saved.proposal);
-  for(const [index,binding] of bindings.entries()){
-   const dep=deps[index];
-   need(binding.binding_id===dep.binding_id&&preflight.basis.device_bindings.some(value=>same(value,binding)),'execution_plan_binding');
-   const grant=grants.find(item=>same(item.request.lookup.controller_scope,binding.controller_scope));
-   need(grant&&grant.grant.device_actions.some(value=>same(value,binding.device_action)),'execution_plan_grant');
+  for(const {dep,binding,grant} of targets){
    const id=grant.request.lookup.preparation_id;
    if(!grantBasis.has(id)){
     const observed=prepared.grants?.get(id);
     if(!observed?.reply||observed.item.runId!==run.run_id||!same(observed.item.request,grant.request)||!same(observed.item.pairing_ref,grant.pairing_ref))return null;
+    const expected=scheduled?{...grant.request,schedule_device_ids:scheduled.get(grant)}:grant.request;
+    if(!same(observed.request,expected))return null;
     const {original,assertCurrentInTransaction}=observed.reply;
-    try{if(original.state!=='eligible'||!same(original.request,grant.request)||assertCurrentInTransaction()!==true)return null;}
+    try{if(original.state!=='eligible'||!same(original.request,expected)||assertCurrentInTransaction()!==true)return null;}
     catch{return null;}
     const pair=currentPairingInTransaction(grant.pairing_ref);
     const limit=BigInt(original.eligible_before_ns),expires=BigInt(pair.expires_ns);
@@ -1240,14 +1263,23 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
    need(db.inTransaction,'execution_schedule_transaction');
    return Boolean(busySlot.get(definitionId));
-  },async admitScheduledOccurrence(source,readClock,sample){
+  },...(withScheduledRuntime&&{resolveScheduledSource(candidate){
+   return writer(()=>{
+    const {schedule_id,occurrence_id,activation_ref,definition_id,definition_version,definition_artifact_ref}=candidate;
+    const slot=slotFor(definition_id);
+    if(slot.active_run_id===null)return null;
+    const run=currentRun(proposalRun(slot.active_run_id));
+    if(run.lifecycle!=='armed'||run.active_execution_id!==null||run.pause_latches.length||
+     run.definition_version!==definition_version||!same(run.artifact_ref,definition_artifact_ref))return null;
+    return {schedule_id,occurrence_id,activation_ref,run_id:run.run_id};
+   });
+  }}),async admitScheduledOccurrence(source,readClock,sample){
    need(typeof readClock==='function'&&(!withScheduledRuntime||typeof sample==='function'&&executionScheduling),'execution_schedule_dependencies');
    const fixed=structuredClone(source);
    checked('LifecycleId',fixed.run_id);
    const captured=writer(()=>proposalRun(fixed.run_id));
    const {publication,assertOriginalInTransaction}=publications.prepareExecutionProgram(captured.definition_id,captured.definition_version);
-   const grants=await prepareExecutionGrants(()=>[fixed.run_id]);
-   const {item,recheck}=writer(()=>{
+   function currentPlan(){
     need(!withScheduledRuntime||executionScheduling,'execution_schedule_dependencies');
     const run=currentRun(proposalRun(fixed.run_id));
     need(run.lifecycle==='armed'&&run.active_execution_id===null&&run.pause_latches.length===0,'execution_schedule_run');
@@ -1257,8 +1289,17 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const time=schedules.timeForAdmissionInTransaction(fixed,readClock());
     const selection=scheduleSelection(run,publication,time.first_step_id);
     need(selection.state==='ready_for_preparation','execution_schedule_'+selection.reason);
-    const selectedBranch=selection.selected_branch;
-    const plan=planExecution(run,publication,approval,selectedBranch,{grants});
+    return {run,approval,selectedBranch:selection.selected_branch};
+   }
+   const grants=withScheduledRuntime?await observeExecutionGrants(writer(()=>{
+    const {run,selectedBranch}=currentPlan(),{preflight,grants}=executionGrantInputs(run);
+    const steps=selectedExecutionSteps(publication.compiled,run,selectedBranch);
+    const targets=executionActions(run,publication,steps,preflight,grants);
+    return [...scheduledGrantDevices(targets)].map(([grant,schedule_device_ids])=>({...grant,runId:run.run_id,schedule_device_ids}));
+   })):await prepareExecutionGrants(()=>[fixed.run_id]);
+   const {item,recheck}=writer(()=>{
+    const {run,approval,selectedBranch}=currentPlan();
+    const plan=planExecution(run,publication,approval,selectedBranch,{grants,requireScheduled:withScheduledRuntime});
     need(plan,'execution_schedule_grant');
     return {item:executions.recordScheduled(run,fixed,selectedBranch,plan,readClock),recheck:plan.assertCurrentInTransaction};
    });

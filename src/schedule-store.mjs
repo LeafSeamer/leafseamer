@@ -188,29 +188,37 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
    need(Buffer.byteLength(text)<=8192,'admission_capacity');
    return Object.freeze({body,text,checksum,sealInTransaction(){
     const current=clock.admit(activation,item,readClock());
-    need(BigInt(current.clock.tick_ns)>=BigInt(body.clock.tick_ns)&&same(current.boundary_ref,body.boundary_ref),'admission_clock_changed');
+    need(BigInt(current.clock.tick_ns)>=BigInt(body.clock.tick_ns)&&same(current.boundary_ref,body.boundary_ref)&&
+     same(current.reference_binding,body.reference_binding),'admission_clock_changed');
     put(insertAdmission.run(occurrence_id,execution_id,schedule_id,pad(activation.ref.revision),text,checksum));
    }});
   }}),
-  ...(clock&&{reconcileClock(readClock,isBusy=null){
+  ...(clock&&{reconcileClock(readClock,isBusy=null,{collectDue=false}={}){
    need(typeof readClock==='function','clock_reader');
    const result=writer(()=>{
+    const due=[];
     const rows=db.prepare('SELECT DISTINCT schedule_id FROM schedule_activation WHERE schedule_id>? ORDER BY schedule_id COLLATE BINARY LIMIT 8').pluck().all(cursor);
     for(const id of rows){
      const activation=readActivation(id),version=readVersion(id,activation.body.schedule_version_ref.revision);
      const sample=readClock();
      clock.advance(activation,version,sample);
-     if(admissions&&sample&&isBusy?.(version.body.definition_id)){
+     const {definition_id,definition_version,definition_artifact_ref}=version.body;
+     const busy=admissions&&sample&&isBusy?.(definition_id);
+     if(admissions&&sample&&(busy||collectDue)){
       for(const item of version.body.items){
        if(admissions.get(item.occurrence_id))continue;
        const time=openWindow(activation,item,sample);
-       if(time)clock.blockBusy(activation,item,time);
+       if(!time)continue;
+       if(busy)clock.blockBusy(activation,item,time);
+       else due.push({schedule_id:id,occurrence_id:item.occurrence_id,activation_ref:activation.ref,
+        definition_id,definition_version,definition_artifact_ref});
       }
      }
     }
-    return rows;
+    return {rows,due};
    });
-   cursor=result.length===8?result.at(-1):'';
+   cursor=result.rows.length===8?result.rows.at(-1):'';
+   return result.due;
   }}),
   publish(authentication,scheduleId,value){
    const input=structuredClone(value);

@@ -4,6 +4,7 @@ import {openNativeClock} from './runtime/native-clock.mjs';
 import {startAuthenticationClock} from './runtime/auth-clock.mjs';
 import {inspectLinuxClockEvidence,waitForLinuxAuthentication} from './runtime/linux-clock-evidence.mjs';
 import {startPeerPairingTransport} from './runtime/peer-pairing-transport.mjs';
+import {startScheduleMonitor} from './schedule-monitor.mjs';
 import {startOutboxDelivery} from './runtime/session-denial-delivery.mjs';
 import {startExecutionNotificationDelivery} from './automation-execution-notification.mjs';
 import {createPeerSubscriptionClient} from './peer-subscription-client.mjs';
@@ -250,14 +251,9 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  if(executionNotifications)executionNotificationDelivery=startExecutionNotificationDelivery(executionNotifications,notificationSink.deliver);
  }catch(error){sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close()]);await closeFailedStartup(error);throw error;}
  sampling?.start();
- let scheduleMonitor=null;
- if(sampling?.scheduleClock&&storage.schedules?.reconcileClock){
-  const scan=()=>{
-   try{storage.schedules.reconcileClock(sampling.scheduleClock,storage.runs?.isScheduleSlotBusyInTransaction);}
-   catch{/* 读取或持久写入失败时没有可采用的时间资格。下次从持久边界继续。 */}
-  };
-  scan();scheduleMonitor=setInterval(scan,250);scheduleMonitor.unref();
- }
+ const scheduleMonitor=sampling?.scheduleClock&&storage.schedules?.reconcileClock?
+  startScheduleMonitor({schedules:storage.schedules,runs:storage.runs,dispatchAvailable:peerTransport!==null,
+   readClock:sampling.scheduleClock,sample:authentication.referenceTimeSample}):null;
  const {stageFirstPairing,readFirstPairingCompletion,activateFirstPairing,...normalPairing}=peerApi??{};
  const assertFirstPairingManagement=()=>{if(management!==authorization.pairingManagement)throw new Error('peer_pairing_first_enrollment_management');};
  let stopping;
@@ -295,8 +291,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
     return await peerTransport.deliverRunApprovalProtection(binding_id,notice);
    }:null,runApprovalProtectionStatus:()=>runProtectionDelivery?{...runProtectionDelivery.status(),binding_revocation_scan_failed:bindingRevocationScanFailures}:null,
    useIdentityManagement(){management=authorization.pairingManagement;}}):null,
-  close(){return stopping??=(async()=>{clearInterval(scheduleMonitor);sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
-   const results=await Promise.allSettled([closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close(),installedCapture&&sampling?.close()]);
+  close(){return stopping??=(async()=>{const scheduleStopped=scheduleMonitor?.close();sourceSubscriptions?.close();identityReceiver?.close();bindingReceiver?.close();eventReceiver?.close();snapshotReceiver?.close();
+   const results=await Promise.allSettled([scheduleStopped,closeHttp(),armPreparationDelivery?.close(),runProtectionDelivery?.close(),executionNotificationDelivery?.close(),peerTransport?.close(),publicTransport?.close(),ingressTransport?.close(),supervisedReference?.close(),installedCapture&&sampling?.close()]);
    try{linuxCollector?.close();linuxBootstrap?.close();authentication.stop();}finally{storage.close();}
    const failure=results.find(result=>result.status==='rejected');if(failure)throw failure.reason;})();}
  });

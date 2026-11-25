@@ -20,6 +20,7 @@ const packageRoot=process.env.LEAFSEAMER_PACKAGE_UNDER_TEST??fileURLToPath(new U
 const {migrateStorage}=await import(pathToFileURL(path.join(packageRoot,'dist','storage.mjs')));
 const {automationRunStore}=await import(pathToFileURL(path.join(packageRoot,'dist','automation-run-store.mjs')));
 const {scheduleStore}=await import(pathToFileURL(path.join(packageRoot,'dist','schedule-store.mjs')));
+const {startScheduleMonitor}=await import(pathToFileURL(path.join(packageRoot,'dist','schedule-monitor.mjs')));
 const {automationPublicationStore}=await import(pathToFileURL(path.join(packageRoot,'dist','automation-publication-store.mjs')));
 const {openInstalledPublicationPolicy}=await import(pathToFileURL(path.join(packageRoot,'dist','trusted-pairing-profile.mjs')));
 const {snapshotIngestStore}=await import(pathToFileURL(path.join(packageRoot,'dist','snapshot-ingest-store.mjs')));
@@ -469,6 +470,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
   let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
+  let scheduledObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
    publications:automationPublicationStore({db,service:{...f.identity,schema_revision},isOpen:()=>db.open}),eventAgePolicy:installed?.eventAgePolicy,
@@ -664,7 +666,12 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     return remoteReceipt?{state:'found',record:lookupOverride??remoteReceipt}:{state:'not_found',record:null};
    },prepareEligibility(_binding,_socket,request){
     const receipt=remoteReceipt.applied_receipt;
-    assert.deepEqual(request,{lookup:intent.lookup,grant_ref:receipt.grant_ref,receipt_ref:ref('preparation_receipt',target,receipt.receipt_id,digest(receipt))});
+    const {schedule_device_ids,...grantRequest}=request;
+    assert.deepEqual(grantRequest,{lookup:intent.lookup,grant_ref:receipt.grant_ref,receipt_ref:ref('preparation_receipt',target,receipt.receipt_id,digest(receipt))});
+    if(request.schedule_device_ids){
+     assert.deepEqual(request.schedule_device_ids,[action.device_id]);scheduledObservations++;
+     if(!schedulePeerReady)throw Error('fixture Controller has no qualified scheduled gate');
+    }
     if(!eligible||executionGrantDenied||parameterCase==='grant'&&postCommitTick!==null)throw Error('test target no longer eligible');
     const body={request,state:'eligible',eligible_before_ns:String(epoch+250000000n)};return {body,beforeSend:()=>body};
    }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runActionBinding(...args){
@@ -1137,7 +1144,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            error:{upstream_age_upper_at_m1_ns:'0'}}};
          const sample=offset=>({clock:{tick_ns:tick(offset),domain:clockDomain},reference});
          const activation=schedules.activate(null,scheduleId,{context:context(),expected_revision:null,schedule_version_ref:version.ref},()=>sample('500'));
-         const occurrence=version.body.items[0],source={schedule_id:scheduleId,occurrence_id:occurrence.occurrence_id,activation_ref:activation.ref,run_id:run.run_id};
+         let occurrence=version.body.items[0];
+         const source={schedule_id:scheduleId,occurrence_id:occurrence.occurrence_id,activation_ref:activation.ref,run_id:run.run_id};
          const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock,scheduledRuntime?verified.executionSample:undefined);
          if(scheduledRuntime)verified.advanceReceiver(1020n);
          const viewAt=tick=>schedules.get(null,scheduleId,null,{readClock:()=>sample(tick),inspect:runs.inspectScheduleInTransaction}).occurrences[0];
@@ -1171,15 +1179,43 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          await assert.rejects(admit(),{code:'execution_schedule_grant'});
          executionGrantDenied=false;
          let reads=0;
-         await assert.rejects(admit(()=>sample(reads++>=2?'10000':'1020')),{code:'schedule_admission_clock'});
-         assert.equal(reads,3);
+         const finalRead=scheduledRuntime?3:2;
+         await assert.rejects(admit(()=>sample(reads++>=finalRead?'10000':'1020')),{code:'schedule_admission_clock'});
+         assert.equal(reads,finalRead+1);
          untouched();
          db.exec("CREATE TEMP TRIGGER omit_schedule_claim BEFORE INSERT ON schedule_execution_admission BEGIN SELECT RAISE(IGNORE); END");
          await assert.rejects(admit(),{code:'schedule_storage'});
          db.exec('DROP TRIGGER omit_schedule_claim');
          untouched();
          terminalReply=null;
-         const accepted=await admit();
+         let accepted,monitor=null;
+         if(scheduledRuntime){
+          let offset=999;
+          schedulePeerReady=false;
+          const observations=scheduledObservations;
+          monitor=startScheduleMonitor({schedules,runs,readClock:()=>sample(offset),sample:verified.executionSample});
+          t.after(monitor.close);
+          await wait(300);
+          assert.equal(scheduledObservations,observations);
+          untouched();
+          offset=1020;
+          const before=performance.now()+5000;
+          while(scheduledObservations===observations&&performance.now()<before)await wait(25);
+          assert.ok(scheduledObservations>observations);
+          untouched();
+          schedulePeerReady=true;
+          const until=performance.now()+7000;
+          let record;
+          do{
+           record=db.prepare('SELECT execution_id FROM schedule_execution_admission WHERE schedule_id=?').pluck().get(scheduleId);
+           if(record)break;
+           await wait(25);
+          }while(performance.now()<until);
+          assert.ok(record);
+          const {execution_ref,admission}=runs.getExecution(null,record);
+          accepted={execution_ref,admission};
+          occurrence=version.body.items.find(item=>item.occurrence_id===admission.occurrence_id);
+         }else accepted=await admit();
          assert.equal(accepted.admission.occurrence_id,occurrence.occurrence_id);
          assert.deepEqual(accepted.admission.activation_ref,activation.ref);
          assert.deepEqual(accepted.admission.schedule_version_ref,version.ref);
@@ -1200,16 +1236,16 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          await assert.rejects(admit(),{code:'execution_schedule_run'});
          assert.equal(result(await verified.live('5',{value:true})).disposition,'suppressed_busy');
          schedules.reconcileClock(()=>sample('1020'),runs.isScheduleSlotBusyInTransaction);
-         const overlap=schedules.get(null,scheduleId).occurrences[1];
+         const overlap=schedules.get(null,scheduleId).occurrences.find(item=>item.occurrence_id!==occurrence.occurrence_id);
          assert.equal(overlap.state,'blocked');
          assert.equal(overlap.stop.reason,'run_busy');
          const next=schedules.publish(null,scheduleId,{...input,context:context(),expected_version:'1',
-          items:[{...item,local_start:new Date(sampledAt+60000).toISOString().slice(0,-1)}]});
+          items:[{...item,item_id:occurrence.item_id,local_start:new Date(sampledAt+60000).toISOString().slice(0,-1)}]});
          schedules.activate(null,scheduleId,{context:context(),expected_revision:'1',schedule_version_ref:next.ref});
          schedules.reconcileClock(()=>null);
          const occurrenceView={occurrence_id:occurrence.occurrence_id,state:'accepted',admission:accepted.admission};
          assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
-         assert.deepEqual(schedules.get(null,scheduleId,'1').occurrences,[occurrenceView,overlap]);
+         assert.deepEqual(schedules.get(null,scheduleId,'1').occurrences,version.body.items.map(item=>item.occurrence_id===occurrence.occurrence_id?occurrenceView:overlap));
          const step=execution.steps[0].plan,readSchedule=db.transaction(()=>schedules.readActionScheduleInTransaction(execution.execution,step));
          assert.deepEqual(readSchedule(),{admission:accepted.admission,step_window:occurrence.step_windows[0],
           window_index:occurrence.step_windows.map(({step_id,step_window_digest})=>({step_id,step_window_digest}))});
@@ -1301,6 +1337,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(finalExecution.steps[0].submission.terminal,terminalReply);
           assert.equal(finalExecution.completion?.body.run_revision_after,'8');
           assert.equal(runs.get(null,run.run_id).active_execution_id,null);
+          await monitor.close();
           runs.stopExecutionTimers();
          }
          assert.equal(commandSubmits,scheduledRuntime?2:1);
