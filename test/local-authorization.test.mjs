@@ -7,6 +7,7 @@ import os from 'node:os';
 import https from 'node:https';
 import {pathToFileURL} from 'node:url';
 import Database from 'better-sqlite3';
+import canonicalize from 'canonicalize';
 import {peerCertificates} from '../../leafseamer-controller/test/fixtures/peer-certificates.mjs';
 import {packageRoot,publicationMaterial} from './automation-publication-fixture.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
@@ -214,4 +215,87 @@ test('发布权限取远端和本地交集，服务主体不能获准发布，�
  const created=f.store.drafts.create(handle,f.draft(draftContext));
  await assert.rejects(f.store.publications.publish(handle,created.definition_id,{context:{context_id:context.context_id,idempotency_key:id()},expected_draft_revision:created.revision,expected_content_digest:created.content_digest,expected_selection_digest:created.selection_digest}),{code:'publication_source_unavailable'});
  f.close();const db=new Database(path.join(f.dir,'seamer.sqlite'));try{assert.equal(db.prepare('SELECT count(*) FROM local_context_request WHERE context_id=?').pluck().get(context.context_id),0);assert.equal(db.prepare('SELECT count(*) FROM definition_version_reservation').pluck().get(),0);}finally{db.close();}f.open();
+});
+
+test('本机排期发布和激活在同一服务库内固定步骤窗口与逻辑场次',async t=>{
+ const scopes=[...permissions,'definition.publish','schedule.read','schedule.publish','schedule.activate'];
+ let material;
+ const f=fixture(t,{revision:'35',managerPermissions:scopes,schedule:false,publicationSource:{
+  async resolve(){return structuredClone(material.snapshot);},
+  assertCurrentInTransaction(){return digest(material.snapshot);}
+ }});
+ const firstActor=f.handle(f.principal,scopes);
+ const scope={authority_service_id:f.service.service_id,database_instance_id:f.service.database_instance_id};
+ material=publicationMaterial(scope);
+ const context=f.auth.createRequestContext(firstActor,{audience:f.service.service_id,selection,operations:['createDefinition','publishDefinition'],
+  ttl_ms:60000,max_unique_requests:4});f.advance(1000000n);
+ const draft=f.store.drafts.create(firstActor,{context:{context_id:context.context_id,idempotency_key:id()},content:material.content,metadata:{name:'排期测试',description:'',layout:{}}});
+ const published=await f.store.publications.publish(firstActor,draft.definition_id,{context:{context_id:context.context_id,idempotency_key:id()},
+  expected_draft_revision:draft.revision,expected_content_digest:draft.content_digest,expected_selection_digest:draft.selection_digest});
+ assert.equal(f.store.schedules,undefined);
+ f.close();const migrated=migrateStorage(f.dir,'36');
+ assert.equal(migrated.service_id,f.service.service_id);assert.equal(migrated.database_instance_id,f.service.database_instance_id);
+ f.open();
+ const actor=f.handle(f.principal,scopes),restricted=f.handle(f.principal,scopes.filter(value=>value!=='schedule.activate'));
+ const certs=peerCertificates(),fullToken='v1.'+id()+'.'+'A'.repeat(43),restrictedToken='v1.'+id()+'.'+'B'.repeat(43);
+ const handles=new Map([[fullToken,actor],[restrictedToken,restricted]]),diagnostic=[];
+ const authorization={...f.auth,createScheduleContext(...args){
+  const result=f.auth.createScheduleContext(...args);f.advance(1000000n);return result;
+ }};
+ const app=await startDraftHttp({cert:certs.leaves[0].cert,key:certs.leaves[0].key,bindingId:id(),service:f.store.identity,bootId:f.store.serviceBootId,
+  receiver:{async prepare({token}){return handles.get(token);}},authorization,drafts:f.store.drafts,publications:f.store.publications,runs:f.store.runs,
+  localSchedules:f.store.schedules,onFailure(value){diagnostic.push(value);}});
+ t.after(()=>app.close());
+ const scheduleId=id(),post=(operation,request,token=fullToken)=>new Promise((resolve,reject)=>{
+  const body=Buffer.from(canonicalize({operation,request}));
+  const req=https.request(new URL('/auth/local-schedules/v1',app.origin),{method:'POST',headers:{
+   Authorization:'Bearer '+token,'Content-Type':'application/json','Content-Length':String(body.length)},ca:certs.ca,agent:false},res=>{
+   const chunks=[];res.on('data',chunk=>chunks.push(chunk));res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(Buffer.concat(chunks))}));
+  });
+  req.on('error',reject);req.end(body);
+ });
+ async function issued(operation_id){
+  const reply=await post('create-context',{operation_id,ttl_ms:30000,max_unique_requests:4});
+  assert.equal(reply.status,200,JSON.stringify(diagnostic));return reply.body.result.context_id;
+ }
+ const publishContext=await issued('publishSchedule');
+ const item={item_id:'programme',one_shot_key:'edition',local_start:'2026-11-25T19:00:00.000',offset:'+09:00',
+  steps:[{step_id:'first',role:'on_air',start_offset_ms:0,latest_start_offset_ms:1500}]};
+ const input={context:{context_id:publishContext,idempotency_key:id()},definition_id:draft.definition_id,definition_version:published.definition_version,
+  expected_artifact_ref:published.artifact_ref,expected_version:null,items:[item]};
+ const publish=(version=input,schedule_id=scheduleId)=>post('publish',{schedule_id,version});
+ const get=(version=null)=>post('get',{schedule_id:scheduleId,version});
+ const invalidId=id();
+ assert.equal((await publish({...input,context:{...input.context,idempotency_key:id()},items:[item,{...item,item_id:'bad',offset:'+14:01'}]},invalidId)).status,422);
+ assert.equal((await post('get',{schedule_id:invalidId,version:null})).status,404);
+ const first=await publish();assert.equal(first.status,200,JSON.stringify(diagnostic));
+ assert.deepEqual(await publish(),first);
+ assert.equal(first.body.result.body.items[0].step_windows[0].not_after,'2026-11-25T10:00:01.500Z');
+ assert.equal(first.body.result.body.items[0].step_windows[0].action_binding_id,'action');
+ assert.equal((await get()).body.result.activation,null);
+ assert.equal((await post('create-context',{operation_id:'activateSchedule',ttl_ms:30000,max_unique_requests:1},restrictedToken)).status,403);
+ const activateContext=await issued('activateSchedule');
+ const activation={context:{context_id:activateContext,idempotency_key:id()},expected_revision:null,schedule_version_ref:first.body.result.ref};
+ const activate=(input=activation)=>post('activate',{schedule_id:scheduleId,activation:input});
+ assert.equal((await activate()).status,200);
+ const moved={...input,context:{...input.context,idempotency_key:id()},expected_version:'1',items:[{...item,local_start:'2026-11-26T19:00:00.000'}]};
+ const second=await publish(moved);assert.equal(second.status,200,JSON.stringify(diagnostic));
+ assert.equal(second.body.result.body.items[0].occurrence_id,first.body.result.body.items[0].occurrence_id);
+ assert.deepEqual((await get('1')).body.result.version,first.body.result);
+ assert.equal((await get('3')).status,404);
+ assert.deepEqual((await get()).body.result.activation.body.schedule_version_ref,first.body.result.ref);
+ const proposed={...activation,expected_revision:'1',schedule_version_ref:second.body.result.ref};
+ const results=await Promise.all([activate({...proposed,context:{...activation.context,idempotency_key:id()}}),
+  activate({...proposed,context:{...activation.context,idempotency_key:id()}})]);
+ assert.deepEqual(results.map(result=>result.status).sort(),[200,409]);
+ assert.deepEqual((await get()).body.result.activation.body.schedule_version_ref,second.body.result.ref);
+ assert.equal((await publish({...moved,context:{...moved.context,idempotency_key:id()},expected_version:'2',items:[{...item,one_shot_key:'new'}]})).status,409);
+ f.close();
+ const db=new Database(path.join(f.dir,'seamer.sqlite'),{readonly:true});
+ try{
+  assert.equal(db.prepare('SELECT count(*) FROM schedule_occurrence').pluck().get(),1);
+  assert.equal(db.prepare('SELECT count(*) FROM schedule_request').pluck().get(),4);
+  assert.equal(db.prepare('SELECT count(*) FROM automation_execution').pluck().get(),0);
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
+ }finally{db.close();}
 });

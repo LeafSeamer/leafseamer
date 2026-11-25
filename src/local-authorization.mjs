@@ -12,7 +12,9 @@ const proposalOperation='createRunApprovalProposal';
 const approveOperation='approveRun';
 const revokeOperation='revokeRunApproval';
 const armOperation='armRun';
-const supported=new Set(['auth.manage','auth.read','request.create','request.read','definition.read','definition.edit','definition.publish','run.manage','run.read','run.approve','run.approval.revoke','run.arm']);
+const scheduleOperations=new Map([['publishSchedule','schedule.publish'],['activateSchedule','schedule.activate']]);
+const supported=new Set(['auth.manage','auth.read','request.create','request.read','definition.read','definition.edit','definition.publish','run.manage','run.read','run.approve','run.approval.revoke','run.arm',
+ 'schedule.read',...scheduleOperations.values()]);
 const utc=v=>BigInt(Date.parse(v))*1000000n;
 const binding=v=>{const s=v.snapshot;return {issuer_id:s.issuer_id,issuer_epoch:s.issuer_epoch,principal_id:s.principal_id,principal_kind:s.principal_kind,
  session_id:s.session_id,session_revision:s.session_revision,credential_id:s.credential_id,subject_revision:s.subject_revision,policy_revision:s.policy_revision,
@@ -38,8 +40,11 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
  const fixed=structuredClone(issuer),scope={authority_service_id:service.service_id,database_instance_id:service.database_instance_id},adapter=createHttpAdapter(selection);
  const privateApprovalOperation=operation=>operation===proposalOperation&&Number(service.schema_revision)>=6||operation===approveOperation&&Number(service.schema_revision)>=7||
   operation===revokeOperation&&Number(service.schema_revision)>=8;
- const privateHumanOperation=operation=>privateApprovalOperation(operation)||operation===armOperation&&Number(service.schema_revision)>=14;
- const permissionFor=operation=>operation===armOperation?'run.arm':privateApprovalOperation(operation)?(operation===revokeOperation?'run.approval.revoke':'run.approve'):adapter.describe('seamer',operation).extensions['x-permission'];
+ const scheduleEnabled=Number(service.schema_revision)>=36;
+ const privateHumanOperation=operation=>privateApprovalOperation(operation)||operation===armOperation&&Number(service.schema_revision)>=14||
+  scheduleEnabled&&scheduleOperations.has(operation);
+ const permissionFor=operation=>operation===armOperation?'run.arm':privateApprovalOperation(operation)?(operation===revokeOperation?'run.approval.revoke':'run.approve'):
+  scheduleOperations.get(operation)??adapter.describe('seamer',operation).extensions['x-permission'];
  const inside=()=>need(isOpen()&&db.open&&db.inTransaction,'transaction');
  const writer=work=>{need(isOpen()&&db.open&&!db.inTransaction,'closed');return db.transaction(work).immediate();};
  const decode=(text,hash)=>{const v=JSON.parse(text);need(canonical(v)===text&&digest(v)===hash,'integrity');return v;};
@@ -84,8 +89,8 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
  }
  function draftProof({authentication,operation_id,definition_id,context_id,scope:expected}){
   inside();const human=privateHumanOperation(operation_id);
-  need(same(scope,expected)&&(operations.includes(operation_id)||human),'scope');
-  const read=operation_id==='getDraft'?'definition.read':operation_id==='getRun'?'run.read':null;
+  need(same(scope,expected)&&(operations.includes(operation_id)||human||scheduleEnabled&&operation_id==='getSchedule'),'scope');
+  const read=operation_id==='getDraft'?'definition.read':operation_id==='getRun'?'run.read':operation_id==='getSchedule'?'schedule.read':null;
   const {found,original}=read&&context_id===null?{found:authorized(authentication,read),original:null}:context(authentication,context_id,operation_id);
   if(operation_id==='publishDefinition')need(found.value.snapshot.principal_kind==='human','human');
   need(found.grant.definition_scope.kind==='all'||definition_id!==null&&found.grant.definition_scope.definition_ids.includes(definition_id),'object');
@@ -116,7 +121,8 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   const preflights=operation===armOperation&&Number(service.schema_revision)>=13?
    db.prepare("SELECT count(*) FROM automation_run_preflight WHERE json_extract(body_jcs,'$.reader.arm_context_id')=?").pluck().get(contextId):0;
   const arms=Number(service.schema_revision)>=14?db.prepare('SELECT count(*) FROM automation_run_arm WHERE context_id=?').pluck().get(contextId):0;
-  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms;
+  const schedules=scheduleEnabled?db.prepare('SELECT count(*) FROM schedule_request WHERE context_id=?').pluck().get(contextId):0;
+  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms+schedules;
  }
  function assertContextCapacity(proof){
   inside();const row=db.prepare('SELECT body_jcs,digest FROM local_request_context WHERE context_id=?').raw().get(proof.context_id);need(row,'context');
@@ -166,7 +172,7 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
    need(fields(request,['request_id','principal_id','principal_kind','expected_revision','permissions','definition_scope','not_before_ns','expires_ns'])&&uuid(request.request_id)&&uuid(request.principal_id)&&['human','service'].includes(request.principal_kind),'request');
    need(request.expected_revision===null||typeof request.expected_revision==='string'&&/^[1-9][0-9]{0,19}$/.test(request.expected_revision)&&request.expected_revision.length<=20,'request');
    need(Array.isArray(request.permissions)&&request.permissions.length<=supported.size&&new Set(request.permissions).size===request.permissions.length&&request.permissions.every(p=>supported.has(p)),'request');
-   need(request.principal_kind==='human'||!request.permissions.some(p=>['definition.publish','run.approve','run.approval.revoke','run.arm'].includes(p)),'human');
+   need(request.principal_kind==='human'||!request.permissions.some(p=>['definition.publish','run.approve','run.approval.revoke','run.arm',...scheduleOperations.values()].includes(p)),'human');
    const ds=request.definition_scope;need(fields(ds,['kind','definition_ids'])&&['all','selected'].includes(ds.kind)&&Array.isArray(ds.definition_ids)&&ds.definition_ids.length<=256&&new Set(ds.definition_ids).size===ds.definition_ids.length&&ds.definition_ids.every(uuid)&& (ds.kind!=='all'||ds.definition_ids.length===0),'request');
    request=structuredClone(request);request.permissions.sort();request.definition_scope.definition_ids.sort();const requestDigest=digest(request);
    return writer(()=>{
@@ -201,6 +207,10 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
    need(fields(options,['ttl_ms','max_unique_requests']),'request');
    return issueContext(handle,{...options,audience:service.service_id,selection,operations:[armOperation]},armOperation);
   },
+  ...(scheduleEnabled&&{createScheduleContext(handle,operation,options){
+   need(scheduleOperations.has(operation)&&fields(options,['ttl_ms','max_unique_requests']),'request');
+   return issueContext(handle,{...options,audience:service.service_id,selection,operations:[operation]},operation);
+  }}),
   identifyRunApprovalActorInTransaction(handle){
    const {snapshot:s}=identity(handle);
    return {issuer_id:s.issuer_id,issuer_epoch:s.issuer_epoch,principal_id:s.principal_id,principal_kind:s.principal_kind};

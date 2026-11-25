@@ -369,3 +369,16 @@ Schema 15 增加准备回执账本。停机后执行 `leafseamer migrate-storage
 停机显式迁移至 Schema 16 后，受信调用方可使用 `runs.completeArmRun(authentication, operation_ref)`，以受理时同一人员和凭据完成普通布防。Seamer 读取全目标当前资格并复核来源、预留预算、活动槽和运行修订，封存结果及通知后将运行推进至 `armed`。定义槽继续持有，活动操作清空，派发保持关闭。原发起人凭当前读取权限可以查回同一完成结果。显式撤销该运行批准时，当前运行以原撤销操作为凭据进入 `paused`。
 
 Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-proposals/{proposal_id}`。配对 Controller 须有 `automation.prepare.read`，且服务和数据库必须与提案的目标条目一致。请求绑定提案摘要和一次挑战；返回原件及引用，认证审计通过引用保存。目标 Controller 在本机配对通道使用 `readRunApprovalProposal`，验证响应挑战、摘要、精确目标和有效期限。读取结果供随后核对认可前提，Controller 仍须检查当前签发方授权及本地可授范围。
+
+### 本机排期
+
+显式迁移至 Schema 36 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
+
+| 操作 | 请求 |
+| --- | --- |
+| `create-context` | `{operation_id, ttl_ms, max_unique_requests}`，操作 ID 为 `publishSchedule` 或 `activateSchedule` |
+| `publish` | `{schedule_id, version}`，版本包含 `context`、`expected_version`、`definition_id`、`definition_version`、`expected_artifact_ref` 和 `items`。首次发布的 `expected_version` 为 `null` |
+| `activate` | `{schedule_id, activation}`，激活请求包含 `context`、`expected_revision` 和 `schedule_version_ref`。首次激活的 `expected_revision` 为 `null` |
+| `get` | `{schedule_id, version}`，`version` 为 `null` 时返回最新发布版本，并单列当前激活引用 |
+
+单次项包含稳定的 `item_id`、`one_shot_key`、带毫秒的 `local_start`、显式 `±HH:MM` 偏移，以及每个动作步骤的 `step_id`、`role`、`start_offset_ms` 和 `latest_start_offset_ms`。同项改期沿用原场次身份。发布与激活分别需要人员的 `schedule.publish` 和 `schedule.activate` 权限及近期认证，读取要求 `schedule.read`。排期激活和运行布防是独立操作。

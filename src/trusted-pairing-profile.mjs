@@ -60,7 +60,7 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
   let publicApi=null;
   if(Object.hasOwn(value,'public_api')){
    const api=value.public_api;
-   const optional=['local_event_bindings','local_source_subscriptions','local_run_approvals'];
+   const optional=['local_event_bindings','local_source_subscriptions','local_run_approvals','local_schedules'];
    fields(api,['host','port','certificate_file','private_key_file','binding_id','allowed_origins','local_permissions',
     ...optional.filter(key=>Object.hasOwn(api,key))]);
    pairingUuid(api.binding_id);
@@ -71,7 +71,7 @@ export function readTrustedPairingProfile(file,{linux=false}={}){
     optional.every(key=>!Object.hasOwn(api,key)||typeof api[key]==='boolean'),'pairing_profile_public_api');
    publicApi={host:api.host,port:api.port,binding_id:api.binding_id,allowedOrigins:api.allowed_origins,localPermissions:api.local_permissions,
     localEventBindings:api.local_event_bindings===true,localSourceSubscriptions:api.local_source_subscriptions===true,
-    localRunApprovals:api.local_run_approvals===true,
+    localRunApprovals:api.local_run_approvals===true,localSchedules:api.local_schedules===true,
     cert:readFile(api.certificate_file,65536),key:readFile(api.private_key_file,65536)};
   }
   for(const key of ['publication_policy','arm_admission_policy']){
