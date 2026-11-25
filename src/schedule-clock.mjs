@@ -42,7 +42,7 @@ function qualify(sample,scope,boot){
   bundle_ref:reference(bundle.bundle_id,bundle.bundle_digest)};
 }
 
-export function scheduleClockStore(db,scope,boot){
+export function scheduleClockStore(db,scope,boot,wasAdmitted){
  function clockRecord(occurrence){
   const row=db.prepare(`SELECT activation_revision,body_jcs,body_digest,window_enter_tick,observed_tick,qualified_before_tick,fault
    FROM schedule_occurrence_clock WHERE occurrence_id=? ORDER BY activation_revision DESC LIMIT 1`).raw().get(occurrence);
@@ -73,6 +73,7 @@ export function scheduleClockStore(db,scope,boot){
    const proof=qualify(sample,scope,boot),clock=sample?.clock??null;
    const revision=pad(activation.ref.revision),now=clock?BigInt(clock.tick_ns):null;
    for(const item of version.body.items){
+    if(wasAdmitted?.(item.occurrence_id))continue;
     if(db.prepare('SELECT 1 FROM schedule_occurrence_stop WHERE occurrence_id=?').pluck().get(item.occurrence_id))continue;
     // An activation can remove the item from subsequent scans. Keep the old
     // version active if this transaction cannot establish where its window stands.
@@ -111,6 +112,20 @@ export function scheduleClockStore(db,scope,boot){
     put(db.prepare('INSERT INTO schedule_occurrence_clock VALUES(?,?,?,?,?,?,?,?,?)').run(item.occurrence_id,schedule_id,revision,canonical(body),
      digest(body),pad(enter),pad(now),pad(proof.before),0));
    }
+  },
+  admit(activation,item,sample){
+   need(db.inTransaction,'schedule_admission_transaction');
+   const {occurrence_id}=item,prior=clockRecord(occurrence_id),step=firstWindow(item);
+   const step_window_ref=reference(step.step_window_id,step.step_window_digest);
+   const proof=qualify(sample,scope,boot);
+   need(proof&&prior&&!prior.fault&&same(prior.body.activation_ref,activation.ref)&&prior.body.service_boot_id===boot&&
+    same(prior.body.domain,sample.clock.domain)&&same(prior.body.step_window_ref,step_window_ref)&&
+    !db.prepare('SELECT 1 FROM schedule_occurrence_stop WHERE occurrence_id=?').pluck().get(occurrence_id),'schedule_admission_clock');
+   const now=BigInt(sample.clock.tick_ns);
+   need(now>=prior.observed&&now>=prior.enter&&now<prior.before&&
+    proof.lower>=BigInt(step.window.not_before_utc_ns)&&proof.upper<BigInt(step.window.not_after_utc_ns),'schedule_admission_window');
+   return {first_step_id:step.step_id,step_window_ref,boundary_ref:prior.ref,clock:sample.clock,reference_bundle_ref:proof.bundle_ref,
+    utc_interval:{lower_ns:String(proof.lower),upper_ns:String(proof.upper)}};
   },
   status(occurrenceId){
    const stopped=db.prepare('SELECT body_jcs,body_digest FROM schedule_occurrence_stop WHERE occurrence_id=?').raw().get(occurrenceId);

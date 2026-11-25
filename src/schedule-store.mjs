@@ -46,7 +46,9 @@ function timestamp(ms){
 
 export function scheduleStore({db,service,bootId,isOpen,authority,publications}){
  const scope=freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});
- const clock=Number(service.schema_revision)>=37?scheduleClockStore(db,scope,bootId):null;
+ const admissions=Number(service.schema_revision)>=38?db.prepare('SELECT body_jcs,body_digest FROM schedule_execution_admission WHERE occurrence_id=?').raw():null;
+ const clock=Number(service.schema_revision)>=37?scheduleClockStore(db,scope,bootId,admissions&&((id)=>Boolean(admissions.get(id)))):null;
+ const insertAdmission=admissions&&db.prepare('INSERT INTO schedule_execution_admission VALUES(?,?,?,?,?,?)');
  let cursor='';
  function writer(work){need(isOpen()&&db.open&&!db.inTransaction,'writer');return db.transaction(work).immediate();}
  function authorize(authentication,operation_id,definition_id,context_id){
@@ -127,6 +129,32 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
   return freeze(result);
  }
  return Object.freeze({
+  ...(admissions&&{prepareAdmissionInTransaction(source,run,execution_id,steps,readClock){
+   need(db.inTransaction&&typeof readClock==='function','admission_transaction');
+   const {schedule_id,occurrence_id,activation_ref}=source;
+   need(!admissions.get(occurrence_id),'occurrence_claimed');
+   const activation=readActivation(schedule_id);
+   need(activation&&same(activation.ref,activation_ref),'activation_conflict');
+   const version=readVersion(schedule_id,activation.body.schedule_version_ref.revision);
+   const item=version.body.items.find(item=>item.occurrence_id===occurrence_id);
+   need(item&&same(run.scope,scope)&&run.definition_id===version.body.definition_id&&run.definition_version===version.body.definition_version&&
+    same(run.artifact_ref,version.body.definition_artifact_ref),'admission_artifact');
+   const time=clock.admit(activation,item,readClock()),byStep=new Map(item.step_windows.map(step=>[step.step_id,step]));
+   const first=steps.find(({step})=>step.step_id===time.first_step_id);
+   const actions=steps.filter(({step})=>step.kind==='action');
+   need(first?.step.kind==='action'&&first.dependencies.length===0&&actions.every(({step,action})=>
+    byStep.get(step.step_id)?.action_binding_id===action.action_binding_ref.id),'admission_steps');
+   const body=freeze({format:'leafseamer.schedule-admission/1',scope,service_boot_id:bootId,occurrence_id,schedule_id,execution_id,
+    logical_key_digest:item.logical_key_digest,run_id:run.run_id,artifact_ref:run.artifact_ref,activation_ref:activation.ref,
+    schedule_version_ref:version.ref,...time});
+   const text=canonical(body),checksum=digest(body);
+   need(Buffer.byteLength(text)<=8192,'admission_capacity');
+   return Object.freeze({body,text,checksum,sealInTransaction(){
+    const current=clock.admit(activation,item,readClock());
+    need(BigInt(current.clock.tick_ns)>=BigInt(body.clock.tick_ns)&&same(current.boundary_ref,body.boundary_ref),'admission_clock_changed');
+    put(insertAdmission.run(occurrence_id,execution_id,schedule_id,pad(activation.ref.revision),text,checksum));
+   }});
+  }}),
   ...(clock&&{reconcileClock(readClock){
    need(typeof readClock==='function','clock_reader');
    const result=writer(()=>{
@@ -187,7 +215,10 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
     const proof=authorize(authentication,'getSchedule',bound,null);
     const result={version:readVersion(scheduleId,version),activation:readActivation(scheduleId)};
     need(result.version,'missing');
-    if(clock)result.occurrences=result.version.body.items.map(item=>({occurrence_id:item.occurrence_id,...clock.status(item.occurrence_id)}));
+    if(clock)result.occurrences=result.version.body.items.map(({occurrence_id})=>{
+     const row=admissions?.get(occurrence_id);
+     return {occurrence_id,...(row?{state:'accepted',admission:original(...row)}:clock.status(occurrence_id))};
+    });
     need(same(proof,authorize(authentication,'getSchedule',bound,null)),'authorization_changed');
     return freeze(result);
    });

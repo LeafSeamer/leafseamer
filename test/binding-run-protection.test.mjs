@@ -19,6 +19,7 @@ import {triggerReference} from './fixtures/trigger-reference.mjs';
 const packageRoot=process.env.LEAFSEAMER_PACKAGE_UNDER_TEST??fileURLToPath(new URL('../',import.meta.url));
 const {migrateStorage}=await import(pathToFileURL(path.join(packageRoot,'dist','storage.mjs')));
 const {automationRunStore}=await import(pathToFileURL(path.join(packageRoot,'dist','automation-run-store.mjs')));
+const {scheduleStore}=await import(pathToFileURL(path.join(packageRoot,'dist','schedule-store.mjs')));
 const {automationPublicationStore}=await import(pathToFileURL(path.join(packageRoot,'dist','automation-publication-store.mjs')));
 const {openInstalledPublicationPolicy}=await import(pathToFileURL(path.join(packageRoot,'dist','trusted-pairing-profile.mjs')));
 const {snapshotIngestStore}=await import(pathToFileURL(path.join(packageRoot,'dist','snapshot-ingest-store.mjs')));
@@ -385,6 +386,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['同一运行域采用成功终态后解锁原依赖，重开读回证据','31',null,'validated','terminal_dependency'],
  ['来源失步后查回成功终态只作历史证据','31',null,'validated','terminal_after_protection'],
  ['R5 规则提交并释放活动执行，下一事件可受理','32',null,'validated','r5_rule'],
+ ['排期与事件共享空闲活动槽，受理与版本绑定同事务','38',null,'validated','r5_schedule'],
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
@@ -415,7 +417,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  f.store.close();
  inspect(f.dir,db=>{
   const subject=id();db.prepare('INSERT INTO local_subject VALUES(?,?,?,?,?)').run(subject,actor.issuer_id,actor.issuer_epoch,actor.principal_id,'human');
-  db.prepare('INSERT INTO local_request_context VALUES(?,?,?,?,?)').run(contextId,subject,bootId,'{}',digest({}));
+  const body=commandCase==='r5_schedule'?{context:{operations:['activateSchedule','publishSchedule']}}:{};
+  db.prepare('INSERT INTO local_request_context VALUES(?,?,?,?,?)').run(contextId,subject,bootId,canonical(body),digest(body));
  });
  f.reopen();const boot=f.store.serviceBootId,published=await f.publish();
  const create=()=>f.store.runs.create(null,{context:{context_id:contextId,idempotency_key:id()},definition_id:draft.definition_id,
@@ -494,6 +497,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    armAdmissionPolicy:{inspectInTransaction(){assert.ok(db.inTransaction);
     if(revokeOnWrite&&db.prepare('SELECT 1 FROM automation_arm_budget').pluck().get())return null;
     return {profile_ref:proof,qualification_ref:proof,capacity:{...counts,rows:limited?'39':'40'},required:counts};}}};
+  const schedulesFor=(data,bootId)=>scheduleStore({db:data,service:assembly.service,bootId,isOpen:()=>data.open,
+   authority:assembly.authority,publications:assembly.publications});
+  if(commandCase==='r5_schedule')assembly.schedules=schedulesFor(db,boot);
   const runs=automationRunStore(assembly);
   t.after(()=>runs.stopExecutionTimers?.());
   let preCommitTick=null,postCommitTick=null;
@@ -1098,6 +1104,75 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         }
         // 验证下一事件的状态和槽选择，仅观察受理。
         runs.stopExecutionTimers();
+        if(commandCase==='r5_schedule'){
+         const schedules=assembly.schedules,scheduleId=id(),context=()=>({context_id:contextId,idempotency_key:id()});
+         const item={item_id:'programme',one_shot_key:'show',local_start:new Date(sampledAt).toISOString().slice(0,-1),offset:'+00:00',
+          steps:[{step_id:'first',role:'on_air',start_offset_ms:0,latest_start_offset_ms:1500}]};
+         const input={context:context(),definition_id:draft.definition_id,definition_version:published.definition_version,
+          expected_artifact_ref:published.artifact_ref,expected_version:null,items:[item]};
+         const version=schedules.publish(null,scheduleId,input);
+         const clockDomain={clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:digest('schedule domain')};
+         const binding={domain:{...scope,...clockDomain}},anchor={binding,anchor_tick_ns:'0',exchange_start_tick_ns:'0',
+          utc_at_anchor:{lower_ns:String(epoch-1010n),upper_ns:String(epoch-1000n)}};
+         const reference={service_boot_id:boot,valid_before_tick_ns:'10000',state:{binding,status:'qualified'},
+          bundle:{anchor,bundle_id:id(),bundle_digest:digest(anchor),profile:{elapsed_error_ppm:0,span_quantization_ns:'1'},
+           policy:{max_half_width_ns:'25',max_anchor_age_ns:'20000',max_exchange_age_ns:'20000',max_upstream_age_ns:'20000'},
+           error:{upstream_age_upper_at_m1_ns:'0'}}};
+         const sample=tick_ns=>({clock:{tick_ns,domain:clockDomain},reference});
+         const activation=schedules.activate(null,scheduleId,{context:context(),expected_revision:null,schedule_version_ref:version.ref},()=>sample('500'));
+         const occurrence=version.body.items[0],source={schedule_id:scheduleId,occurrence_id:occurrence.occurrence_id,activation_ref:activation.ref,run_id:run.run_id};
+         const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock,()=> 'rule');
+         const untouched=()=>{
+          assert.equal(db.prepare('SELECT count(*) FROM automation_execution').pluck().get(),1);
+          assert.equal(db.prepare('SELECT count(*) FROM schedule_execution_admission').pluck().get(),0);
+          assert.equal(db.prepare('SELECT count(*) FROM automation_execution_head').pluck().get(),0);
+          assert.deepEqual(runs.get(null,run.run_id),done);
+         };
+         await assert.rejects(admit(()=>sample('999')),{code:'schedule_admission_window'});
+         await assert.rejects(admit(undefined,{...source,activation_ref:{...activation.ref,digest:digest('stale activation')}}),{code:'schedule_activation_conflict'});
+         executionGrantDenied=true;
+         await assert.rejects(admit(),{code:'execution_schedule_grant'});
+         executionGrantDenied=false;
+         let reads=0;
+         await assert.rejects(admit(()=>sample(reads++?'10000':'1020')),{code:'schedule_admission_clock'});
+         untouched();
+         db.exec("CREATE TEMP TRIGGER omit_schedule_claim BEFORE INSERT ON schedule_execution_admission BEGIN SELECT RAISE(IGNORE); END");
+         await assert.rejects(admit(),{code:'schedule_storage'});
+         db.exec('DROP TRIGGER omit_schedule_claim');
+         untouched();
+         const accepted=await admit();
+         assert.equal(accepted.admission.occurrence_id,occurrence.occurrence_id);
+         assert.deepEqual(accepted.admission.activation_ref,activation.ref);
+         assert.deepEqual(accepted.admission.schedule_version_ref,version.ref);
+         assert.deepEqual(accepted.admission.artifact_ref,published.artifact_ref);
+         const execution=runs.getExecution(null,accepted.execution_ref.object_id);
+         assert.deepEqual(execution.admission,accepted.admission);
+         assert.deepEqual(execution.execution_ref,accepted.execution_ref);
+         assert.equal(execution.execution.origin_kind,'schedule');
+         assert.equal(execution.execution.receive_cursor,undefined);
+         assert.equal(execution.anchor,null);
+         assert.equal(execution.steps[0].plan.step_id,accepted.admission.first_step_id);
+         assert.equal(runs.get(null,run.run_id).active_execution_id,accepted.execution_ref.object_id);
+         assert.equal(runs.get(null,run.run_id).revision,'7');
+         await assert.rejects(admit(),{code:'execution_schedule_run'});
+         assert.equal(result(await verified.live('5',{value:true})).disposition,'suppressed_busy');
+         const next=schedules.publish(null,scheduleId,{...input,context:context(),expected_version:'1',
+          items:[{...item,local_start:new Date(sampledAt+60000).toISOString().slice(0,-1)}]});
+         schedules.activate(null,scheduleId,{context:context(),expected_revision:'1',schedule_version_ref:next.ref});
+         schedules.reconcileClock(()=>null);
+         const occurrenceView={occurrence_id:occurrence.occurrence_id,state:'accepted',admission:accepted.admission};
+         assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
+         assert.equal(db.prepare('SELECT count(*) FROM schedule_occurrence_stop').pluck().get(),0);
+         assert.equal(commandSubmits,1);
+         assert.deepEqual(db.pragma('foreign_key_check'),[]);
+         inspect(f.dir,reopened=>{
+          const bootId=id(),schedules=schedulesFor(reopened,bootId);
+          const historical=automationRunStore({...assembly,db:reopened,bootId,isOpen:()=>reopened.open,schedules});
+          assert.deepEqual(historical.getExecution(null,accepted.execution_ref.object_id),execution);
+          assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
+         });
+         return;
+        }
         const following=result(await verified.live('5',{value:true}));
         assert.equal(following.disposition,r5Protected?'suppressed_busy':stateMachine?'no_match':'accepted');
         if(commandCase==='r5_rule'){
@@ -1116,6 +1191,28 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          db.close();
          assert.equal(migrateStorage(f.dir,'33').schema_revision,'33');
          await verifyNotificationRestart(f.dir,originalExecution.completion);
+        }
+        if(commandCase==='r5_rule'){
+         db.close();
+         const service=migrateStorage(f.dir,'37');
+         const executions=inspect(f.dir,reopened=>reopened.prepare(
+          'SELECT execution_id,body_jcs,body_digest FROM automation_execution ORDER BY execution_id').raw().all());
+         assert.equal(executions.length,2);
+         inspect(f.dir,reopened=>reopened.exec('CREATE TABLE schedule_execution_admission(sentinel TEXT) STRICT'));
+         assert.throws(()=>migrateStorage(f.dir,'38'),{code:'migration_failed'});
+         inspect(f.dir,reopened=>{
+          assert.equal(reopened.pragma('user_version',{simple:true}),37);
+          assert.deepEqual(reopened.prepare('SELECT execution_id,body_jcs,body_digest FROM automation_execution ORDER BY execution_id').raw().all(),executions);
+          reopened.exec('DROP TABLE schedule_execution_admission');
+         });
+         assert.equal(migrateStorage(f.dir,'38').database_instance_id,service.database_instance_id);
+         inspect(f.dir,reopened=>{
+          assert.deepEqual(reopened.prepare('SELECT execution_id,body_jcs,body_digest FROM automation_execution ORDER BY execution_id').raw().all(),executions);
+          assert.deepEqual(reopened.pragma('foreign_key_check'),[]);
+          const historical=automationRunStore({...assembly,db:reopened,service:{...service,schema_revision:'38'},bootId:id(),
+           isOpen:()=>reopened.open});
+          assert.deepEqual(historical.getExecution(null,decision.execution_id),originalExecution);
+         });
         }
         return;
        }

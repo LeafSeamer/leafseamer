@@ -75,7 +75,7 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
   return writer(()=>{const proof=authorize(authentication,'getDraft',id,null),bundle=historical(id,version),value=select(bundle);need(same(proof,authorize(authentication,'getDraft',id,null)),'publication_authorization_changed');return freeze(structuredClone(value));});
  }
  return Object.freeze({
-  prepareTriggerProgram(id,version){
+  prepareExecutionProgram(id,version){
    available();
    const publication=Object.freeze(historical(id,version,true));
    return Object.freeze({publication,assertOriginalInTransaction(){

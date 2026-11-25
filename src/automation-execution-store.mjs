@@ -28,17 +28,22 @@ export function selectedExecutionSteps(compiled,run,selected){
  return records.map(({step,...group},ordinal)=>({...group,ordinal,step,dependencies:edges.get(step.step_id)}));
 }
 
-export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null}){
- const writeExecution=db.prepare('INSERT INTO automation_execution VALUES(?,?,?,?,?,?)');
+export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null,schedules=null}){
+ const writeExecution=db.prepare('INSERT INTO automation_execution(execution_id,run_id,decision_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
+ const writeScheduled=schedules&&db.prepare('INSERT INTO automation_execution(execution_id,run_id,occurrence_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
+ const advanceScheduledRun=schedules&&db.prepare('UPDATE automation_run_approval_head SET run_revision=? WHERE run_id=? AND run_revision=?');
  const writePlan=db.prepare('INSERT INTO automation_execution_step_plan VALUES(?,?,?,?,?)');
  const writeStep=db.prepare('INSERT INTO automation_execution_step_state VALUES(?,?,?,?)');
  const writeSeal=db.prepare('INSERT INTO automation_execution_seal VALUES(?,?,?)');
  const writeHead=db.prepare('INSERT INTO automation_execution_head VALUES(?,?)');
  const select=`SELECT e.execution_id,e.run_id,e.decision_id,e.arm_operation_id,e.body_jcs,e.body_digest,s.body_jcs,s.body_digest,d.body_digest
-  FROM automation_execution e JOIN automation_execution_seal s USING(execution_id) JOIN automation_trigger_decision d USING(decision_id)
-  JOIN automation_trigger_decision_set t ON t.ingest_epoch=d.ingest_epoch AND t.receive_sequence=d.receive_sequence`;
- const byId=db.prepare(select+' WHERE e.execution_id=?').raw();
- const current=db.prepare(select+' JOIN automation_execution_head h USING(execution_id) WHERE h.definition_id=?').raw();
+  ${schedules?',e.occurrence_id,a.body_jcs,a.body_digest':''}
+  FROM automation_execution e JOIN automation_execution_seal s USING(execution_id) LEFT JOIN automation_trigger_decision d USING(decision_id)
+  LEFT JOIN automation_trigger_decision_set t ON t.ingest_epoch=d.ingest_epoch AND t.receive_sequence=d.receive_sequence
+  ${schedules?'LEFT JOIN schedule_execution_admission a ON a.occurrence_id=e.occurrence_id AND a.execution_id=e.execution_id':''}`;
+ const sealedSource=schedules?'(t.ingest_epoch IS NOT NULL OR a.occurrence_id IS NOT NULL)':'t.ingest_epoch IS NOT NULL';
+ const byId=db.prepare(select+' WHERE e.execution_id=? AND '+sealedSource).raw();
+ const current=db.prepare(select+' JOIN automation_execution_head h USING(execution_id) WHERE h.definition_id=? AND '+sealedSource).raw();
  const allSteps=db.prepare(`SELECT p.step_id,p.ordinal,p.body_jcs,p.body_digest,w.initial_jcs,w.initial_digest
   FROM automation_execution_step_plan p JOIN automation_execution_step_state w USING(execution_id,step_id)
   WHERE p.execution_id=? ORDER BY p.ordinal`).raw();
@@ -61,26 +66,57 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   const value=JSON.parse(text);need(canonical(value)===text&&digest(value)===hash,'execution_plan_integrity');return value;
  }
  function original(row){
-  const [id,runId,decisionId,operationId,text,hash,noticeText,noticeHash,decisionHash]=row;
+  const [id,runId,decisionId,operationId,text,hash,noticeText,noticeHash,decisionHash,occurrenceId,admissionText,admissionHash]=row;
   const execution=decode(text,hash),execution_ref=reference('execution',scope,id,hash),notice=decode(noticeText,noticeHash);
-  need(execution.format==='leafseamer.trigger-execution/1'&&same(execution.scope,scope)&&execution.execution_id===id&&execution.run_id===runId&&
-   same(execution.decision_ref,reference('trigger_decision',scope,decisionId,decisionHash))&&execution.arm_completion_ref.object_id===operationId&&
-   same(notice,{kind:'execution_plan_sealed',execution_ref,decision_ref:execution.decision_ref,run_id:runId,revision:execution.run_revision}),
-   'execution_plan_integrity');
+  const common={kind:'execution_plan_sealed',execution_ref,run_id:runId,revision:execution.run_revision};
+  need(same(execution.scope,scope)&&execution.execution_id===id&&execution.run_id===runId&&execution.arm_completion_ref.object_id===operationId,'execution_plan_integrity');
+  if(occurrenceId){
+   const admission=decode(admissionText,admissionHash),admission_ref=reference('schedule_admission',scope,occurrenceId,admissionHash);
+   need(execution.format==='leafseamer.scheduled-execution/1'&&execution.origin_kind==='schedule'&&same(execution.admission_ref,admission_ref)&&
+    admission.format==='leafseamer.schedule-admission/1'&&same(admission.scope,scope)&&admission.occurrence_id===occurrenceId&&
+    admission.execution_id===id&&admission.run_id===runId&&admission.service_boot_id===execution.service_boot_id&&
+    same(admission.artifact_ref,execution.artifact_ref)&&same(notice,{...common,admission_ref}),'execution_plan_integrity');
+   return {execution_ref,execution,admission};
+  }
+  need(execution.format==='leafseamer.trigger-execution/1'&&execution.origin_kind==='trigger'&&
+   same(execution.decision_ref,reference('trigger_decision',scope,decisionId,decisionHash))&&
+   same(notice,{...common,decision_ref:execution.decision_ref}),'execution_plan_integrity');
   return {execution_ref,execution};
  }
  function record(decision,decisionDigest,plan){
   need(db.inTransaction&&decision.disposition==='accepted','execution_plan_transaction');
   const {execution_id,run_id,decision_id,run_revision_after,arm_completion_ref,receive_cursor,artifact_ref,arm_generation}=decision;
-  const {steps,budget,activation_slot,program_digest,graph_digest,grant_basis,policy_ref,business_state,approved_before_ns,target_state_id}=plan;
   const decision_ref=reference('trigger_decision',scope,decision_id,decisionDigest);
-  const execution={format:'leafseamer.trigger-execution/1',scope,execution_id,run_id,definition_id:activation_slot.definition_id,
+  const original={format:'leafseamer.trigger-execution/1',
    ...(withActionParameters?{runtime_revision:'3',origin_digest:decision.evaluation.origin_digest}:withDelays?{runtime_revision:'2'}:{}),
-   service_boot_id:bootId,origin_kind:'trigger',decision_ref,receive_cursor,artifact_ref,program_digest,graph_digest,arm_generation,
-   arm_completion_ref,activation_slot,run_revision:run_revision_after,business_state,grant_basis,policy_ref,approved_before_ns,
+   origin_kind:'trigger',decision_ref,receive_cursor,evaluation_digest:digest(decision.evaluation),selected_branch:decision.evaluation.selected_branch};
+  return persist({execution_id,run_id,arm_completion_ref,artifact_ref,arm_generation,run_revision:run_revision_after},original,
+   {decision_ref},plan,writeExecution,decision_id);
+ }
+ function recordScheduled(run,source,selectedBranch,plan,readClock){
+  need(db.inTransaction&&run.lifecycle==='armed'&&run.active_execution_id===null&&run.run_arm_completion_ref&&
+   same(run.scope,scope)&&plan.activation_slot.active_run_id===run.run_id&&plan.activation_slot.definition_id===run.definition_id&&
+   plan.activation_slot.active_operation_id===run.run_arm_completion_ref.object_id,'execution_schedule_run');
+  const {run_id,artifact_ref,arm_generation,run_arm_completion_ref:arm_completion_ref}=run,execution_id=randomUUID(),
+   run_revision=nextExecutionRevision(run.revision);
+  const admission=schedules.prepareAdmissionInTransaction(source,run,execution_id,plan.steps,readClock);
+  const admission_ref=reference('schedule_admission',scope,admission.body.occurrence_id,admission.checksum);
+  const sealed=persist({execution_id,run_id,artifact_ref,arm_generation,arm_completion_ref,run_revision},
+   {format:'leafseamer.scheduled-execution/1',origin_kind:'schedule',admission_ref,selected_branch:selectedBranch},
+   {admission_ref},plan,writeScheduled,admission.body.occurrence_id,Buffer.byteLength(admission.text),1);
+  put(advanceScheduledRun.run(run_revision,run_id,run.revision));
+  plan.assertCurrentInTransaction();
+  admission.sealInTransaction();
+  return {...sealed,admission:admission.body};
+ }
+ function persist(identity,original,source,plan,insert,sourceId,sourceBytes=0,sourceRows=0){
+  const {execution_id,run_id,arm_completion_ref,run_revision}=identity;
+  const {steps,budget,activation_slot,program_digest,graph_digest,grant_basis,policy_ref,business_state,approved_before_ns,target_state_id}=plan;
+  const execution={...original,...identity,scope,definition_id:activation_slot.definition_id,service_boot_id:bootId,
+   program_digest,graph_digest,activation_slot,business_state,grant_basis,policy_ref,approved_before_ns,
    ...(withRunCommit&&{activation_slot_revision:nextExecutionRevision(activation_slot.revision),target_state_id}),
-   evaluation_digest:digest(decision.evaluation),selected_branch:decision.evaluation.selected_branch,steps:[]};
-  let bytes=0,work=0;
+   steps:[]};
+  let bytes=sourceBytes,work=0;
   const rows=steps.map(({phase,group_id,group_mode,ordinal,step,dependencies,action})=>{
    const payload=step.kind==='delay'?{kind:'delay',anchor:'execution_admitted',delay_ms:step.delay_ms,max_lateness_ms:step.max_lateness_ms}:
     {kind:'action',binding:action,guard:step.guard,parameters:step.parameters,parameter_bindings:step.parameter_bindings};
@@ -93,17 +129,18 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
    return {step_id:step.step_id,ordinal,body,planDigest,initialText,initialDigest};
   });
   const text=canonical(execution),hash=digest(execution),execution_ref=reference('execution',scope,execution_id,hash);
-  const notice={kind:'execution_plan_sealed',execution_ref,decision_ref,run_id,revision:run_revision_after};
+  const notice={kind:'execution_plan_sealed',execution_ref,...source,run_id,revision:run_revision};
   bytes+=Buffer.byteLength(text)+Buffer.byteLength(canonical(notice));
-  need(bytes<=maxBytes&&BigInt(bytes)<=BigInt(budget.logical_bytes)&&BigInt(rows.length*2+3)<=BigInt(budget.rows)&&BigInt(budget.queue_slots)>=1n,'execution_plan_capacity');
-  put(writeExecution.run(execution_id,run_id,decision_id,arm_completion_ref.object_id,text,hash));
+  const rowCount=rows.length*2+3+sourceRows;
+  need(bytes<=maxBytes&&BigInt(bytes)<=BigInt(budget.logical_bytes)&&BigInt(rowCount)<=BigInt(budget.rows)&&BigInt(budget.queue_slots)>=1n,'execution_plan_capacity');
+  put(insert.run(execution_id,run_id,sourceId,arm_completion_ref.object_id,text,hash));
   for(const row of rows){
    put(writePlan.run(execution_id,row.step_id,row.ordinal,row.body,row.planDigest));
    put(writeStep.run(execution_id,row.step_id,row.initialText,row.initialDigest));
   }
   put(writeSeal.run(execution_id,canonical(notice),digest(notice)));
   put(writeHead.run(activation_slot.definition_id,execution_id));
-  return {execution_ref,planUsage:{bytes,rows:rows.length*2+3,work},budget};
+  return {execution_ref,planUsage:{bytes,rows:rowCount,work},budget};
  }
  function checkClock(clock,boot,deadline,domain){
   const {acquisition_ref:acquisitionRef,runtime_domain_ref:runtime,tick_ns,upper_ns,valid_before_tick_ns}=clock;
@@ -392,6 +429,6 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   need(tick>=clockInteger(anchor.body.clock.tick_ns),'execution_clock_changed');
   return tick;
  }
- return Object.freeze({record,read,active,...(anchors&&{anchorAdmission}),...(withDelays&&{advanceDelays,protect}),
+ return Object.freeze({record,read,active,...(schedules&&{recordScheduled}),...(anchors&&{anchorAdmission}),...(withDelays&&{advanceDelays,protect}),
   ...(withActionParameters&&{assertActionCurrent,assertActionWindow,sealParameters}),...(submissions&&{reserveSubmission}),...(withRunCommit&&{completionClock})});
 }

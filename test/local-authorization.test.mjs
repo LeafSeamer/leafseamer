@@ -382,4 +382,10 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  assert.deepEqual(status(),stopped);
  assert.equal(elapsed().state,'missed');
  assert.deepEqual(schedules().get(reader,raceId).occurrences[0],protectedOccurrence);
+ f.close();
+ const nextSchema=migrateStorage(f.dir,'38');
+ assert.equal(nextSchema.service_id,f.service.service_id);
+ assert.equal(nextSchema.database_instance_id,f.service.database_instance_id);
+ f.open();reader=f.handle(f.principal,scopes);
+ assert.deepEqual(schedules().get(reader,raceId).occurrences[0],protectedOccurrence);
 });

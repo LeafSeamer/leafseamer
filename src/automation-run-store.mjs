@@ -29,7 +29,7 @@ const utc=value=>{
  return BigInt(millis)*1000000n;
 };
 
-export function automationRunStore({db,service,bootId,isOpen,authority,publications,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult}){
+export function automationRunStore({db,service,bootId,isOpen,authority,publications,schedules=null,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult}){
  const scope=Object.freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});
  const writer=work=>{
   need(isOpen()&&db.open&&!db.inTransaction&&Number(service.schema_revision)>=5,'run_unavailable');
@@ -145,7 +145,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const withRunCommit=Number(service.schema_revision)>=32;
  const executionCommits=withRunCommit?automationExecutionCommit(db):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
- const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions}):null;
+ const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
   JOIN automation_execution e USING(execution_id) WHERE h.definition_id=?`).pluck();
  function slotFor(definitionId){
@@ -210,7 +210,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   for(const [id,version,size] of versions()){
    bytes+=size;
    need(bytes<=67108864&&programs.size<policy.max_condition_nodes,'trigger_program_capacity');
-   programs.set(triggerProgramKey(id,version),publications.prepareTriggerProgram(id,version));
+   programs.set(triggerProgramKey(id,version),publications.prepareExecutionProgram(id,version));
   }
   const grants=executions&&programs.size?await prepareExecutionGrants(runIds):null;
   return {policy,programs,grants};
@@ -243,13 +243,13 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   });
   return new Map(captured.map((item,index)=>[item.request.lookup.preparation_id,{item,reply:observed[index]}]));
  }
- function planTriggerExecution(run,publication,approval,evaluation,prepared){
+ function planExecution(run,publication,approval,selectedBranch,prepared){
   if(!executions)return null;
   const {preflight,operation,grants}=executionGrantInputs(run),slot=slotFor(run.definition_id);
   need(slot.active_run_id===run.run_id&&slot.active_operation_id===operation.operation_id&&(withRunCommit||slot.revision===operation.committed_slot_revision)&&
    same(operation.approval_ref,approval.approval_ref),'execution_slot_changed');
   arm.assertPolicy(preflight.observation,preflight.basis);
-  const steps=selectedExecutionSteps(publication.compiled,run,evaluation.selected_branch);
+  const steps=selectedExecutionSteps(publication.compiled,run,selectedBranch);
   const actionIds=new Set(steps.filter(item=>item.step.kind==='action').map(item=>item.step.action_binding_id));
   const deps=publication.dependencies.actions.filter(action=>actionIds.has(action.binding_id));
   need(deps.length===actionIds.size,'execution_plan_binding');
@@ -286,7 +286,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   return {steps:steps.map(item=>item.step.kind==='action'?{...item,action:actions.get(item.step.action_binding_id)}:item),
    budget:operation.budget.required,activation_slot:slot,grant_basis:[...grantBasis.values()].sort((a,b)=>compare(a.lookup.preparation_id,b.lookup.preparation_id)),
    program_digest:publication.result.program_digest,graph_digest:publication.program.graph_digest,policy_ref:publication.draft.content.policy_ref,
-   business_state:run.business_state,target_state_id:targetState(publication,run.business_state,evaluation.selected_branch),
+   business_state:run.business_state,target_state_id:targetState(publication,run.business_state,selectedBranch),
    approved_before_ns:String(deadline),assertCurrentInTransaction(){
     for(const recheck of recheckGrants)recheck();
     need(authority.runApprovalTimeInTransaction().upper<deadline&&publicationBasisCurrent(run,publication),'execution_grant_changed');
@@ -326,7 +326,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const evaluation={...result,origin_digest:digest(origin),age_evidence_ref:liveEvidence.age_evidence_ref,policy_ref:reference,
     approval_digest:limit.approval_digest,max_age_ms:limit.max_age_ms};
    if(result.outcome==='matched'){
-    const plan=planTriggerExecution(run,publication,approval,evaluation,prepared);
+    const plan=planExecution(run,publication,approval,evaluation.selected_branch,prepared);
     return plan?{disposition:'accepted',reason:'execution_plan_sealed',evaluation,plan}:
      {...protect(executions?'execution_grant_unavailable':'execution_admission_unavailable'),evaluation};
    }
@@ -495,7 +495,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     return result;
    });
    if(!running())return;
-   const bundle=publications.prepareTriggerProgram(initial.run.definition_id,initial.run.definition_version);
+   const bundle=publications.prepareExecutionProgram(initial.run.definition_id,initial.run.definition_version);
    writer(()=>{
     const value=executions.read(id),{execution,execution_ref,anchor,steps}=value;
     const {run,sources,operation}=assertCurrent(execution,bundle.publication);
@@ -530,7 +530,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   async function prepareAction(stepId){
    const value=executions.read(id);
    const runId=value.execution.run_id,{definition_id,artifact_ref}=value.execution;
-   const run=proposalRun(runId),bundle=publications.prepareTriggerProgram(definition_id,run.definition_version);
+   const run=proposalRun(runId),bundle=publications.prepareExecutionProgram(definition_id,run.definition_version);
    const {publication}=bundle;
    need(same(publication.result.artifact_ref,artifact_ref),'execution_action_publication');
    function snapshot(deadline,expectedParameters=null){
@@ -1190,6 +1190,26 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   }finally{pendingPlans--;}
  }
  return Object.freeze({
+  ...(executions?.recordScheduled&&{async admitScheduledOccurrence(source,readClock,evaluateInTransaction){
+   need(typeof evaluateInTransaction==='function'&&typeof readClock==='function','execution_schedule_dependencies');
+   const fixed=structuredClone(source);
+   checked('LifecycleId',fixed.run_id);
+   const captured=writer(()=>proposalRun(fixed.run_id));
+   const {publication,assertOriginalInTransaction}=publications.prepareExecutionProgram(captured.definition_id,captured.definition_version);
+   const grants=await prepareExecutionGrants(()=>[fixed.run_id]);
+   return writer(()=>{
+    const run=currentRun(proposalRun(fixed.run_id));
+    need(run.lifecycle==='armed'&&run.active_execution_id===null&&run.pause_latches.length===0,'execution_schedule_run');
+    const approval=approvals.currentAuthorityInTransaction(run);
+    assertOriginalInTransaction();
+    need(Object.hasOwn(publication.snapshot.review,'binding_approval_refs')&&publicationBasisCurrent(run,publication),'execution_schedule_publication');
+    const selectedBranch=evaluateInTransaction(publication.compiled,run);
+    need(typeof selectedBranch==='string','execution_schedule_branch');
+    const plan=planExecution(run,publication,approval,selectedBranch,{grants});
+    need(plan,'execution_schedule_grant');
+    return executions.recordScheduled(run,fixed,selectedBranch,plan,readClock);
+   });
+  }}),
   ...(executions&&{getExecution(authentication,executionId){return writer(()=>{
    const result=executions.read(executionId);need(result,'execution_missing');
    const run=proposalRun(result.execution.run_id);
