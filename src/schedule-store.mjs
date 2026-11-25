@@ -1,6 +1,7 @@
 import {randomUUID} from 'node:crypto';
 import {canonical,digest,same} from './runtime/auth-clock-value.mjs';
 import {freeze} from './automation-expression.mjs';
+import {scheduleClockStore} from './schedule-clock.mjs';
 
 const need=(ok,code)=>{if(!ok)throw Object.assign(new Error('schedule_'+code),{code:'schedule_'+code});};
 const fields=(value,names)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===names;
@@ -43,8 +44,10 @@ function timestamp(ms){
  return value;
 }
 
-export function scheduleStore({db,service,isOpen,authority,publications}){
+export function scheduleStore({db,service,bootId,isOpen,authority,publications}){
  const scope=freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});
+ const clock=Number(service.schema_revision)>=37?scheduleClockStore(db,scope,bootId):null;
+ let cursor='';
  function writer(work){need(isOpen()&&db.open&&!db.inTransaction,'writer');return db.transaction(work).immediate();}
  function authorize(authentication,operation_id,definition_id,context_id){
   const proof=authority.authorizeInTransaction({authentication,operation_id,definition_id,context_id,scope});
@@ -124,6 +127,18 @@ export function scheduleStore({db,service,isOpen,authority,publications}){
   return freeze(result);
  }
  return Object.freeze({
+  ...(clock&&{reconcileClock(readClock){
+   need(typeof readClock==='function','clock_reader');
+   const result=writer(()=>{
+    const rows=db.prepare('SELECT DISTINCT schedule_id FROM schedule_activation WHERE schedule_id>? ORDER BY schedule_id COLLATE BINARY LIMIT 8').pluck().all(cursor);
+    for(const id of rows){
+     const activation=readActivation(id),version=readVersion(id,activation.body.schedule_version_ref.revision);
+     clock.advance(activation,version,readClock());
+    }
+    return rows;
+   });
+   cursor=result.length===8?result.at(-1):'';
+  }}),
   publish(authentication,scheduleId,value){
    const input=structuredClone(value);
    need(fields(input,'context,definition_id,definition_version,expected_artifact_ref,expected_version,items')&&revision(input.definition_version)&&
@@ -168,6 +183,7 @@ export function scheduleStore({db,service,isOpen,authority,publications}){
     const proof=authorize(authentication,'getSchedule',bound,null);
     const result={version:readVersion(scheduleId,version),activation:readActivation(scheduleId)};
     need(result.version,'missing');
+    if(clock)result.occurrences=result.version.body.items.map(item=>({occurrence_id:item.occurrence_id,...clock.status(item.occurrence_id)}));
     need(same(proof,authorize(authentication,'getSchedule',bound,null)),'authorization_changed');
     return freeze(result);
    });

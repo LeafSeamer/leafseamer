@@ -43,7 +43,7 @@ files.push(['storage-v26.sql',await fs.readFile(path.join(root,'src','storage-v2
 files.push(['storage-v27.sql',await fs.readFile(path.join(root,'src','storage-v27.sql'))]);
 files.push(['storage-v28.sql',await fs.readFile(path.join(root,'src','storage-v28.sql'))]);
 for(const name of ['storage-v29.sql','storage-v30.sql','storage-v31.sql','storage-v32.sql','storage-v33.sql','storage-v34.sql','storage-v35.sql','automation-execution-notification.mjs','automation-execution-commit.mjs','automation-submission-store.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
-for(const name of ['storage-v36.sql','schedule-store.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
+for(const name of ['storage-v36.sql','storage-v37.sql','schedule-store.mjs','schedule-clock.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['trusted-pairing-profile.mjs','protected-ingress-profile.mjs','installed-arm-admission-policy.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['run-approval-store.mjs',await fs.readFile(path.join(root,'src','run-approval-store.mjs'))]);
 for(const name of ['peer-identity-watermark.mjs','peer-identity-watermark.sql'])files.push([name,await fs.readFile(path.join(root,'src',name))]);

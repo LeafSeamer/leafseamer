@@ -39,6 +39,14 @@ export function openReferenceSampling({db,identity,bootId,binding,supervision,co
      release:(receipt,acknowledgement)=>archive.release({receipt,acknowledgement,reservation,assertCurrent})};
    });
   }});
+ function scheduleClock(){
+  let sample;
+  try{sample=authentication.referenceTimeSample();}catch{return null;}
+  const {tick_ns,runtime_domain_ref:domain}=sample;
+  const clock={tick_ns,domain};
+  return {clock,reference:anchors.receiverReference.readFirst({tick_ns,runtime_domain_ref:domain})};
+ }
  return Object.freeze({receiverReference:anchors?.receiverReference??null,current:anchors?.current??null,status:scheduler.status,start:scheduler.start,
+  ...(anchors&&{scheduleClock}),
   close(){return closing??=(async()=>{const drained=scheduler.close();collector.close();await drained;})();}});
 }

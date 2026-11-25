@@ -278,7 +278,8 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  const activation={context:{context_id:activateContext,idempotency_key:id()},expected_revision:null,schedule_version_ref:first.body.result.ref};
  const activate=(input=activation)=>post('activate',{schedule_id:scheduleId,activation:input});
  assert.equal((await activate()).status,200);
- const moved={...input,context:{...input.context,idempotency_key:id()},expected_version:'1',items:[{...item,local_start:'2026-11-26T19:00:00.000'}]};
+ const moved={...input,context:{...input.context,idempotency_key:id()},expected_version:'1',items:[
+  {...item,local_start:'2026-11-26T19:00:00.000'},{...item,item_id:'expired',local_start:'2026-11-24T19:00:00.000'}]};
  const second=await publish(moved);assert.equal(second.status,200,JSON.stringify(diagnostic));
  assert.equal(second.body.result.body.items[0].occurrence_id,first.body.result.body.items[0].occurrence_id);
  assert.deepEqual((await get('1')).body.result.version,first.body.result);
@@ -293,9 +294,47 @@ test('本机排期发布和激活在同一服务库内固定步骤窗口与逻�
  f.close();
  const db=new Database(path.join(f.dir,'seamer.sqlite'),{readonly:true});
  try{
-  assert.equal(db.prepare('SELECT count(*) FROM schedule_occurrence').pluck().get(),1);
+  assert.equal(db.prepare('SELECT count(*) FROM schedule_occurrence').pluck().get(),2);
   assert.equal(db.prepare('SELECT count(*) FROM schedule_request').pluck().get(),4);
   assert.equal(db.prepare('SELECT count(*) FROM automation_execution').pluck().get(),0);
   assert.deepEqual(db.pragma('foreign_key_check'),[]);
  }finally{db.close();}
+ assert.equal(migrateStorage(f.dir,'37').service_id,f.service.service_id);
+ f.open();
+ let reader=f.handle(f.principal,scopes);
+ const schedules=()=>f.store.schedules,occurrence=second.body.result.body.items[0];
+ const stepStart=BigInt(occurrence.step_windows[0].window.not_before_utc_ns);
+ const domain={clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:'sha256:'+'2'.repeat(64)};
+ const status=()=>schedules().get(reader,scheduleId).occurrences[0];
+ function drive(tick,value=null){
+  const clock={tick_ns:String(tick),domain};
+  let reference=null;
+  if(value!==null){
+   const binding={domain:{...domain,...scope}},anchor={binding,anchor_tick_ns:'0',exchange_start_tick_ns:'0',
+    utc_at_anchor:{lower_ns:String(value-10n),upper_ns:String(value)}};
+   reference={service_boot_id:f.store.serviceBootId,valid_before_tick_ns:'10000',state:{binding,status:'qualified'},
+    bundle:{anchor,bundle_id:'anchor',bundle_digest:digest(anchor),profile:{elapsed_error_ppm:0,span_quantization_ns:'1'},
+     policy:{max_half_width_ns:'25',max_anchor_age_ns:'20000',max_exchange_age_ns:'20000',max_upstream_age_ns:'20000'},
+     error:{upstream_age_upper_at_m1_ns:'0'}}};
+  }
+  schedules().reconcileClock(()=>({clock,reference}));
+ }
+ assert.equal(status().state,'awaiting_reference');
+ drive(50n,stepStart-101n);
+ assert.equal(status().window_enter_tick_ns,'100');
+ const elapsed=()=>schedules().get(reader,scheduleId).occurrences[1];
+ assert.equal(elapsed().state,'missed');
+ const boundary=status().boundary_ref;
+ drive(60n,stepStart-121n);
+ assert.equal(status().window_enter_tick_ns,'100');
+ drive(70n);assert.equal(status().state,'reference_unavailable');
+ drive(80n,stepStart-101n);assert.equal(status().state,'tracking');
+ drive(90n);
+ drive(100n,stepStart-101n);
+ const stopped=status();assert.equal(stopped.state,'blocked');assert.equal(stopped.stop.reason,'reference_time_lost');
+ assert.deepEqual(stopped.stop.boundary_ref,boundary);
+ drive(101n,stepStart-101n);assert.deepEqual(status(),stopped);
+ f.close();f.open();reader=f.handle(f.principal,scopes);
+ assert.deepEqual(status(),stopped);
+ assert.equal(elapsed().state,'missed');
 });
