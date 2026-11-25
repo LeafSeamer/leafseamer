@@ -21,6 +21,7 @@ const fields=(value,names)=>value&&Object.keys(value).sort().join(',')===names;
 const view=({last_receive_cursor,ingest_revision,dependency_digest,run_arm_completion_ref,arm_source_baselines,trigger_pause_revision,...run})=>({...run,last_receive_seq:last_receive_cursor.receive_sequence});
 const compare=(a,b)=>a<b?-1:a>b?1:0;
 const orderAction=(a,b)=>compare(a.device_id,b.device_id)||compare(a.action_id,b.action_id)||compare(a.capability_version,b.capability_version);
+const parameterSchemas=publication=>new Map(publication.snapshot.schemas.map(({binding_id,schema_ref,document})=>[binding_id,{schema_ref,document}]));
 const proposalOperation='createRunApprovalProposal';
 const preflightWindowNs=2000000000n;
 const utc=value=>{
@@ -492,7 +493,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   submissionRecovery=()=>{active=false;clearTimeout(timer);submissionRecovery=null;};
   timer=setTimeout(scan,5000).unref();
  }
- function scheduleExecution(item,{sample,checkConnection,predecessor,readEvent,recheckDelivery,scheduleClock,admissionGrants=null}){
+ function scheduleExecution(item,{sample,checkConnection,predecessor,readEvent,recheckDelivery,scheduleClock,admissionGrants=null,firstParameters=null}){
   if(!executionScheduling)return;
   const id=item.execution_ref.object_id;
   const running=()=>executionScheduling&&isOpen()&&db.open;
@@ -621,7 +622,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    need(stepPlan,'execution_action_plan');
    const snapshots=captured.observed?eventInputSnapshots(compiled.compiled.input_bindings,captured.observed.origin):new Map();
    need(evaluateExpression(stepPlan.guard,snapshots).value===true,'execution_action_guard');
-   const schemas=new Map(publication.snapshot.schemas.map(({binding_id,schema_ref,document})=>[binding_id,{schema_ref,document}]));
+   const prevalidated=firstParameters?.step_id===stepId&&same(firstParameters.artifact_ref,artifact_ref)?firstParameters.result:null;
    const {grant}=captured;
    const prior=stepId===item.admission?.first_step_id?admissionGrants?.get(grant.request.lookup.preparation_id):null;
    const observe=async()=>{
@@ -636,7 +637,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     return {proof:await observeArmPreparation(grant.pairing_ref.id,request),request};
    };
    const [parameters,eligibility]=await Promise.allSettled([
-    compiled.parameterExecution({snapshots,schemas}).resolve(stepId),observe()
+    prevalidated??compiled.parameterExecution({snapshots,schemas:parameterSchemas(publication)}).resolve(stepId),observe()
    ]);
    if(parameters.status==='rejected')throw parameters.reason;
    const result=parameters.value;
@@ -1301,14 +1302,25 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const time=schedules.timeForAdmissionInTransaction(fixed,readClock());
     const selection=scheduleSelection(run,publication,time.first_step_id);
     need(selection.state==='ready_for_preparation','execution_schedule_'+selection.reason);
-    return {run,approval,selectedBranch:selection.selected_branch};
+    return {run,approval,selectedBranch:selection.selected_branch,firstStepId:time.first_step_id};
    }
-   const grants=withScheduledRuntime?await observeExecutionGrants(writer(()=>{
-    const {run,selectedBranch}=currentPlan(),{preflight,grants}=executionGrantInputs(run);
+   const prepared=withScheduledRuntime?writer(()=>{
+    const {run,selectedBranch,firstStepId}=currentPlan(),{preflight,grants}=executionGrantInputs(run);
     const steps=selectedExecutionSteps(publication.compiled,run,selectedBranch);
     const targets=executionActions(run,publication,steps,preflight,grants);
-    return [...scheduledGrantDevices(targets)].map(([grant,schedule_device_ids])=>({...grant,runId:run.run_id,schedule_device_ids}));
-   })):await prepareExecutionGrants(()=>[fixed.run_id]);
+    return {firstStepId,observations:[...scheduledGrantDevices(targets)]
+     .map(([grant,schedule_device_ids])=>({...grant,runId:run.run_id,schedule_device_ids}))};
+   }):null;
+   let firstParameters=null;
+   if(prepared){
+    const {firstStepId}=prepared,{compiled}=publication,plan=compiled.stepPlan(firstStepId);
+    // 固定参数可以在目标开闸前校验。使用时仍核对发布原件、步骤、RunGrant 和当前窗口。
+    if(plan?.parameters.every(parameter=>parameter.value.references.length===0)){
+     const result=await compiled.parameterExecution({snapshots:new Map(),schemas:parameterSchemas(publication)}).resolve(firstStepId);
+     firstParameters={step_id:firstStepId,artifact_ref:publication.result.artifact_ref,result};
+    }
+   }
+   const grants=prepared?await observeExecutionGrants(prepared.observations):await prepareExecutionGrants(()=>[fixed.run_id]);
    const {item,recheck}=writer(()=>{
     const {run,approval,selectedBranch}=currentPlan();
     const plan=planExecution(run,publication,approval,selectedBranch,{grants,requireScheduled:withScheduledRuntime});
@@ -1336,7 +1348,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
       check();
       return result;
      });
-     if(hasWork)scheduleExecution(item,{sample,scheduleClock:readClock,admissionGrants:grants});
+     if(hasWork)scheduleExecution(item,{sample,scheduleClock:readClock,admissionGrants:grants,firstParameters});
     }catch{
      // Once admission commits, a failed anchor leaves the active slot paused.
     }
