@@ -23,7 +23,7 @@ function requestHttps(origin,ca,{method,target,headers,body,credential}){
   req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('acceptance_https_timeout')));req.end(body);
  });
 }
-async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh}){
+async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh,dispatch}){
  async function request(operation,input){
   const body=Buffer.from(canonical({operation,request:input}));
   const response=await requestHttps(origin,ca,{target:'/auth/local-schedules/v1',method:'POST',body,
@@ -62,13 +62,47 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
  assert.ok(accepted,'Controller did not durably accept the scheduled command');
  const {admission}=occurrence;
  assert.deepEqual(admission.activation_ref,activation.ref);
+ let terminal=null;
+ if(dispatch){
+  const deadline=performance.now()+20000;
+  let settled;
+  do{
+   const failure=frames.find(f=>f.event==='automation-target-failed');
+   assert.equal(failure,undefined,JSON.stringify({failure,stages:frames.filter(f=>f.event.startsWith('automation-target-'))
+    .map(({event,stage,present,disposition,code,cause,constraint,reported_ms,remaining_ms})=>({event,stage,present,disposition,code,cause,constraint,reported_ms,remaining_ms}))}));
+   settled=frames.find(f=>f.event==='automation-target-settled');
+   if(settled)break;
+   await delay(25);
+  }while(performance.now()<deadline);
+  assert.deepEqual(settled?.reference,accepted.reference,'Scheduled command did not settle in Controller');
+  const adoptionDeadline=performance.now()+12000;
+  do{
+   const current=await seamer('nativeTriggerExecution',{identity:await refresh(),execution_id:admission.execution_id});
+   const submitted=current.steps[0].submission;
+   if(current.completion){
+    assert.deepEqual(submitted.adjudication.command_ref,accepted.reference);
+    assert.equal(submitted.terminal.state.outcome,'succeeded');
+    assert.equal(submitted.terminal.completion_achieved,'effect_verified');
+    assert.equal(current.completion.notification.event_id,admission.execution_id+'.completed');
+    terminal=submitted.terminal;
+    break;
+   }
+   assert.equal(current.protection,null,JSON.stringify({protection:current.protection,state:submitted?.state}));
+   await delay(200);
+  }while(performance.now()<adoptionDeadline);
+  assert.ok(terminal,'Scheduled execution did not consume the Controller terminal receipt');
+  const finished=await seamer('getRun',{identity:await refresh(),run_id:armed.run_id});
+  assert.equal(finished.lifecycle,'armed');
+  assert.equal(finished.active_execution_id,null);
+  assert.equal(finished.last_execution_id,admission.execution_id);
+ }
  const execution=await seamer('nativeTriggerExecution',{identity:await refresh(),execution_id:admission.execution_id});
  assert.equal(execution.execution.origin_kind,'schedule');
  assert.deepEqual(execution.admission,admission);
  const step=execution.steps[0];
  assert.deepEqual(step.prepared_parameters.body.parameters,{value:12});
  assert.equal(step.plan.step_id,admission.first_step_id);
- frames.push({event:'native-scheduled-target-admission',reference:accepted.reference,grant_ref:grantRef,admission,
+ frames.push({event:'native-scheduled-target-admission',reference:accepted.reference,grant_ref:grantRef,admission,terminal,
   receiver_reference:'native'});
 }
 export async function verifyNativeEventRead({frames,core,config,materials}){
@@ -626,7 +660,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
     assert.deepEqual(retained.trigger_match_set,priorMatchSet.match);
     assert.deepEqual(retained.trigger_decision_set,priorMatchSet.decision);
     if(scheduledAdmission){
-     await verifyScheduledAdmission({seamer,frames,origin:second.apiOrigin,ca:materials.ca,bearer,armed,grantRef,program,refresh});
+     await verifyScheduledAdmission({seamer,frames,origin:second.apiOrigin,ca:materials.ca,bearer,armed,grantRef,program,refresh,dispatch:config.scheduled_dispatch===true});
      await controller('finish');return;
     }
     if(armedDispatch){
