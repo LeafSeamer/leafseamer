@@ -492,7 +492,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   submissionRecovery=()=>{active=false;clearTimeout(timer);submissionRecovery=null;};
   timer=setTimeout(scan,5000).unref();
  }
- function scheduleExecution(item,{sample,checkConnection,predecessor,readEvent,recheckDelivery,scheduleClock}){
+ function scheduleExecution(item,{sample,checkConnection,predecessor,readEvent,recheckDelivery,scheduleClock,admissionGrants=null}){
   if(!executionScheduling)return;
   const id=item.execution_ref.object_id;
   const running=()=>executionScheduling&&isOpen()&&db.open;
@@ -622,9 +622,21 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const snapshots=captured.observed?eventInputSnapshots(compiled.compiled.input_bindings,captured.observed.origin):new Map();
    need(evaluateExpression(stepPlan.guard,snapshots).value===true,'execution_action_guard');
    const schemas=new Map(publication.snapshot.schemas.map(({binding_id,schema_ref,document})=>[binding_id,{schema_ref,document}]));
+   const {grant}=captured;
+   const prior=stepId===item.admission?.first_step_id?admissionGrants?.get(grant.request.lookup.preparation_id):null;
+   const observe=async()=>{
+    // 受理时的 Controller 观察已经核验同一首步目标。复用仍须核对原配对和期限。
+    if(prior?.reply&&same(prior.item.request,grant.request)&&same(prior.item.pairing_ref,grant.pairing_ref)&&
+       prior.request.schedule_device_ids?.includes(captured.step.plan.payload.binding.target.device_action.device_id)){
+     try{
+      if(writer(()=>prior.reply.assertCurrentInTransaction()===true))return {proof:prior.reply,request:prior.request};
+     }catch(error){if(error.code!=='peer_pairing_preparation_expired')throw error;}
+    }
+    const request=structuredClone(grant.request);
+    return {proof:await observeArmPreparation(grant.pairing_ref.id,request),request};
+   };
    const [parameters,eligibility]=await Promise.allSettled([
-    compiled.parameterExecution({snapshots,schemas}).resolve(stepId),
-    observeArmPreparation(captured.grant.pairing_ref.id,structuredClone(captured.grant.request))
+    compiled.parameterExecution({snapshots,schemas}).resolve(stepId),observe()
    ]);
    if(parameters.status==='rejected')throw parameters.reason;
    const result=parameters.value;
@@ -632,9 +644,9 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    assertRunGrantParameters(captured.grant.grant,captured.step.plan.payload.binding.target.device_action,result.parameters);
    if(!isOpen()||!db.open)return;
    if(eligibility.status==='rejected')throw eligibility.reason;
-   const proof=eligibility.value;
-   need(proof?.original.state==='eligible'&&same(proof.original.request,captured.grant.request),'execution_action_grant');
-   const deadline=BigInt(proof.original.eligible_before_ns)<BigInt(originalDeadline)?proof.original.eligible_before_ns:originalDeadline;
+   const {proof,request}=eligibility.value,returned=proof?.original;
+   need(returned?.state==='eligible'&&same(returned.request,request),'execution_action_grant');
+   const deadline=BigInt(returned.eligible_before_ns)<BigInt(originalDeadline)?returned.eligible_before_ns:originalDeadline;
    const recheck=({current,grant})=>{
     bundle.assertOriginalInTransaction();
     assertCurrent(current.execution,publication);
@@ -1324,7 +1336,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
       check();
       return result;
      });
-     if(hasWork)scheduleExecution(item,{sample,scheduleClock:readClock});
+     if(hasWork)scheduleExecution(item,{sample,scheduleClock:readClock,admissionGrants:grants});
     }catch{
      // Once admission commits, a failed anchor leaves the active slot paused.
     }

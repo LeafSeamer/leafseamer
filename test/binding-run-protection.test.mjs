@@ -470,7 +470,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
   let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
-  let scheduledObservations=0,schedulePeerReady=true;
+  let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
    publications:automationPublicationStore({db,service:{...f.identity,schema_revision},isOpen:()=>db.open}),eventAgePolicy:installed?.eventAgePolicy,
@@ -671,7 +671,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     if(request.schedule_device_ids){
      assert.deepEqual(request.schedule_device_ids,[action.device_id]);scheduledObservations++;
      if(!schedulePeerReady)throw Error('fixture Controller has no qualified scheduled gate');
-    }
+    }else ordinaryObservations++;
     if(!eligible||executionGrantDenied||parameterCase==='grant'&&postCommitTick!==null)throw Error('test target no longer eligible');
     const body={request,state:'eligible',eligible_before_ns:String(epoch+250000000n)};return {body,beforeSend:()=>body};
    }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runActionBinding(...args){
@@ -1188,7 +1188,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          db.exec('DROP TRIGGER omit_schedule_claim');
          untouched();
          terminalReply=null;
-         let accepted,monitor=null;
+         let accepted,monitor=null;const observationsBeforeAdmission=ordinaryObservations;
          if(scheduledRuntime){
           let offset=999;
           schedulePeerReady=false;
@@ -1316,6 +1316,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           }while(performance.now()<until);
           const first=finalExecution.steps[0];
           assert.equal(first.submission?.state,'accepted');
+          assert.equal(ordinaryObservations,observationsBeforeAdmission,'first scheduled action reuses its current admission observation');
           assert.deepEqual(observedScheduled.binding.parameters,first.prepared_parameters);
           assert.deepEqual(observedScheduled.binding.step_ready,first.ready);
           assert.deepEqual(observedScheduled.binding.schedule,readSchedule());
