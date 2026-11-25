@@ -34,7 +34,7 @@ export function openReferenceSampling({db,identity,bootId,binding,supervision,co
     const network=JSON.parse(endpoint),authorize=()=>polls.authorizeAttempt(attempt);
     return {reservation,attempt,network,authorize,
      storeControl:control=>polls.storeControl(attempt,control),releaseControl:polls.releaseControl,
-     archive:candidate=>archive.store({reservation,attempt,candidate,authorize,network}),
+     archive:(candidate,ntsBootstrap)=>archive.store({reservation,attempt,candidate,authorize,network,ntsBootstrap}),
      release:(receipt,acknowledgement)=>archive.release({receipt,acknowledgement,reservation,assertCurrent})};
    });
   }});
