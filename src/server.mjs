@@ -253,7 +253,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
  let scheduleMonitor=null;
  if(sampling?.scheduleClock&&storage.schedules?.reconcileClock){
   const scan=()=>{
-   try{storage.schedules.reconcileClock(sampling.scheduleClock);}
+   try{storage.schedules.reconcileClock(sampling.scheduleClock,storage.runs?.isScheduleSlotBusyInTransaction);}
    catch{/* 读取或持久写入失败时没有可采用的时间资格。下次从持久边界继续。 */}
   };
   scan();scheduleMonitor=setInterval(scan,250);scheduleMonitor.unref();

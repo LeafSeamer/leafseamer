@@ -11,8 +11,8 @@ import {armPreparationReceiptStore} from './arm-preparation-receipt-store.mjs';
 import {pairingReference} from './runtime/peer-pairing-value.mjs';
 import {armPlanOriginal} from './runtime/peer-run-arm-plan.mjs';
 import {automationTriggerDecisionStore} from './automation-trigger-decision-store.mjs';
-import {evaluateExpression} from './automation-expression.mjs';
-import {evaluateTriggerCondition,eventInputSnapshots} from './automation-trigger-condition.mjs';
+import {evaluateExpression,evaluateValue} from './automation-expression.mjs';
+import {evaluateScheduledCondition,evaluateTriggerCondition,eventInputSnapshots} from './automation-trigger-condition.mjs';
 import {automationExecutionStore,selectedExecutionSteps} from './automation-execution-store.mjs';
 import {automationSubmissionStore} from './automation-submission-store.mjs';
 import {automationExecutionCommit,completionEvidence,mayContinueAfterFailure,nextExecutionRevision} from './automation-execution-commit.mjs';
@@ -148,6 +148,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
   JOIN automation_execution e USING(execution_id) WHERE h.definition_id=?`).pluck();
+ const busySlot=schedules&&db.prepare('SELECT 1 FROM automation_execution_head WHERE definition_id=?').pluck();
  function slotFor(definitionId){
   const slot=arm.slot(definitionId);
   if(!executionCommits||slot.active_run_id===null)return slot;
@@ -298,6 +299,36 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   const branch=program.transitions.find(item=>item.transition_id===selected&&item.from_state===state?.state_id);
   need(branch,'execution_commit_state');
   return branch.to_state;
+ }
+ function scheduleSelection(run,publication,firstStepId){
+  let remaining=BigInt(executionGrantInputs(run).operation.budget.required.work_units);
+  const charge=amount=>{remaining-=BigInt(amount);need(remaining>=0n,'execution_schedule_capacity');};
+  const {compiled}=publication;
+  const evaluation=evaluateScheduledCondition(compiled,run,charge);
+  if(evaluation.outcome!=='matched')return {state:'unqualified',reason:evaluation.outcome};
+  const first=selectedExecutionSteps(compiled,run,evaluation.selected_branch).find(({step})=>step.step_id===firstStepId);
+  if(first?.step.kind!=='action'||first.dependencies.length)return {state:'unqualified',reason:'first_step_not_ready'};
+  const {guard,parameters}=compiled.stepPlan(firstStepId),snapshots=new Map();
+  charge(guard.nodes+parameters.reduce((total,{value})=>total+value.nodes,0));
+  const guardValue=evaluateExpression(guard,snapshots).value;
+  if(guardValue!==true)return {state:'unqualified',reason:guardValue===false?'first_step_guard_false':'first_step_guard_unknown'};
+  if(parameters.some(({value})=>evaluateValue(value,snapshots).state!=='available'))return {state:'unqualified',reason:'first_step_parameters_unknown'};
+  return {state:'ready_for_preparation',selected_branch:evaluation.selected_branch};
+ }
+ function inspectScheduleInTransaction({definition_id,definition_version,definition_artifact_ref,first_step_id}){
+  need(db.inTransaction,'execution_schedule_transaction');
+  const slot=slotFor(definition_id);
+  if(slot.active_run_id===null)return {state:'unqualified',reason:'run_not_armed'};
+  const run=currentRun(proposalRun(slot.active_run_id));
+  if(run.active_execution_id!==null)return {state:'unqualified',reason:'run_busy'};
+  if(run.lifecycle!=='armed'||run.pause_latches.length)return {state:'unqualified',reason:'run_not_armed'};
+  if(run.definition_version!==definition_version||!same(run.artifact_ref,definition_artifact_ref))return {state:'unqualified',reason:'run_version_changed'};
+  try{approvals.currentAuthorityInTransaction(run);}
+  catch(error){if(error?.code==='run_preflight_approval')return {state:'unqualified',reason:'run_approval_unavailable'};throw error;}
+  const publication=publications.versionForRunInTransaction(definition_id,definition_version,{withEvaluator:true});
+  if(!Object.hasOwn(publication.snapshot.review,'binding_approval_refs')||!publicationBasisCurrent(run,publication))
+   return {state:'unqualified',reason:'publication_unapproved'};
+  return scheduleSelection(run,publication,first_step_id);
  }
  function triggerEvaluator(prepared,origin,liveEvidence){
   let work=0;
@@ -1190,8 +1221,11 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   }finally{pendingPlans--;}
  }
  return Object.freeze({
-  ...(executions?.recordScheduled&&{async admitScheduledOccurrence(source,readClock,evaluateInTransaction){
-   need(typeof evaluateInTransaction==='function'&&typeof readClock==='function','execution_schedule_dependencies');
+  ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
+   need(db.inTransaction,'execution_schedule_transaction');
+   return Boolean(busySlot.get(definitionId));
+  },async admitScheduledOccurrence(source,readClock){
+   need(typeof readClock==='function','execution_schedule_dependencies');
    const fixed=structuredClone(source);
    checked('LifecycleId',fixed.run_id);
    const captured=writer(()=>proposalRun(fixed.run_id));
@@ -1203,8 +1237,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const approval=approvals.currentAuthorityInTransaction(run);
     assertOriginalInTransaction();
     need(Object.hasOwn(publication.snapshot.review,'binding_approval_refs')&&publicationBasisCurrent(run,publication),'execution_schedule_publication');
-    const selectedBranch=evaluateInTransaction(publication.compiled,run);
-    need(typeof selectedBranch==='string','execution_schedule_branch');
+    const time=schedules.timeForAdmissionInTransaction(fixed,readClock());
+    const selection=scheduleSelection(run,publication,time.first_step_id);
+    need(selection.state==='ready_for_preparation','execution_schedule_'+selection.reason);
+    const selectedBranch=selection.selected_branch;
     const plan=planExecution(run,publication,approval,selectedBranch,{grants});
     need(plan,'execution_schedule_grant');
     return executions.recordScheduled(run,fixed,selectedBranch,plan,readClock);

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {compileProgram} from '../dist/automation-compiler.mjs';
-import {evaluateTriggerCondition} from '../dist/automation-trigger-condition.mjs';
+import {evaluateScheduledCondition,evaluateTriggerCondition} from '../dist/automation-trigger-condition.mjs';
 import {selectedExecutionSteps} from '../dist/automation-execution-store.mjs';
 import {source,action,step,delay,input,reference,literal,ref,digest} from './automation-program-fixture.mjs';
 
@@ -76,11 +76,18 @@ test('状态转换一次求值所有当前候选，低优先未知不覆盖胜�
  const origin={source_key:publisher,binding_ref:binding,payload:{schema_ref:{scope:publisher,object_id:ref.id,revision:ref.revision,digest:ref.digest},value:{value:true}}};
  const run={business_state:{state_id:'idle'}},target={bindings:[{binding_id:'trigger'}]};
  const evaluate=(submitted=origin)=>evaluateTriggerCondition(compileProgram(fixed),run,target,submitted,n=>assert.ok(n>=2));
+ const schedule=()=>evaluateScheduledCondition(compileProgram(fixed),run,()=>{});
  const selected=evaluate();assert.equal(selected.outcome,'matched');assert.equal(selected.selected_branch,'win');
  assert.deepEqual(selected.outcomes.map(({id,value})=>[id,value]),[['uncertain','unknown'],['win',true]]);
+ assert.equal(schedule().selected_branch,'win');
+ assert.deepEqual(schedule().qualified_input_binding_ids,[]);
  fixed.program.transitions[1].priority=2;
  assert.equal(evaluate().outcome,'evaluation_unknown');
- fixed.program.transitions[1].condition=literal;
+ assert.equal(schedule().outcome,'evaluation_unknown');
+ fixed.program.transitions[1].condition={kind:'exists',value:reference()};
+ assert.equal(schedule().outcome,'evaluation_unknown');
  assert.equal(evaluate().outcome,'ambiguous');
+ fixed.program.transitions[1].condition=literal;
+ assert.equal(schedule().outcome,'ambiguous');
  const wrong=structuredClone(origin);wrong.payload.schema_ref.digest=digest('other schema');assert.equal(evaluate(wrong),null);
 });

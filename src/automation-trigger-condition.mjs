@@ -3,6 +3,18 @@ import {evaluateExpression} from './automation-expression.mjs';
 
 const ordered=(a,b)=>a<b?-1:a>b?1:0;
 
+function outcomesFor(compiled,branches,snapshots,charge){
+ const work=branches.map(item=>({...item,condition:compiled.condition(item.id)}));
+ charge(work.reduce((total,item)=>total+item.condition.nodes,0));
+ const outcomes=work.map(({id,priority,condition})=>({id,priority,value:evaluateExpression(condition,snapshots).value})).sort((a,b)=>ordered(a.id,b.id));
+ const known=outcomes.filter(item=>item.value===true),unknown=outcomes.filter(item=>item.value==='unknown');
+ const priority=known.length?Math.max(...known.map(item=>item.priority)):null;
+ const winners=known.filter(item=>item.priority===priority);
+ const outcome=winners.length>1?'ambiguous':unknown.some(item=>priority===null||item.priority>=priority)?'evaluation_unknown':winners.length?'matched':'no_match';
+ return {outcome,selected_branch:outcome==='matched'?winners[0].id:null,outcomes,
+  qualified_input_binding_ids:[...snapshots.keys()].sort(ordered)};
+}
+
 export function eventInputSnapshots(inputBindings,origin){
  const source=origin.source_key,registration={id:origin.binding_ref.registration_id,revision:origin.binding_ref.revision,digest:digest(origin.binding_ref)};
  const {schema_ref,value}=origin.payload;
@@ -26,13 +38,14 @@ export function evaluateTriggerCondition(compiled,run,target,origin,charge){
   .filter(item=>item.from_state===run.business_state?.state_id&&bindings.has(item.trigger_binding_id))
   .map(item=>({id:item.transition_id,priority:item.priority,binding:item.trigger_binding_id}));
  if(branches.some(item=>!snapshots.has(item.binding)))return null;
- const work=branches.map(item=>({...item,condition:compiled.condition(item.id)}));
- charge(work.reduce((total,item)=>total+item.condition.nodes,0));
- const outcomes=work.map(({id,priority,condition})=>({id,priority,value:evaluateExpression(condition,snapshots).value})).sort((a,b)=>ordered(a.id,b.id));
- const known=outcomes.filter(item=>item.value===true),unknown=outcomes.filter(item=>item.value==='unknown');
- const priority=known.length?Math.max(...known.map(item=>item.priority)):null;
- const winners=known.filter(item=>item.priority===priority);
- const outcome=winners.length>1?'ambiguous':unknown.some(item=>priority===null||item.priority>=priority)?'evaluation_unknown':winners.length?'matched':'no_match';
- return {outcome,selected_branch:outcome==='matched'?winners[0].id:null,outcomes,
-  qualified_input_binding_ids:[...snapshots.keys()].sort(ordered)};
+ return outcomesFor(compiled,branches,snapshots,charge);
+}
+
+export function evaluateScheduledCondition(compiled,run,charge){
+ const {program}=compiled.compiled;
+ charge(program.kind==='rule'?1:program.transitions.length);
+ const branches=program.kind==='rule'?[{id:'rule',priority:0}]:program.transitions
+  .filter(item=>item.from_state===run.business_state?.state_id)
+  .map(item=>({id:item.transition_id,priority:item.priority}));
+ return outcomesFor(compiled,branches,new Map(),charge);
 }

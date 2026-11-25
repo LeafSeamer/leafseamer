@@ -127,6 +127,11 @@ export function scheduleClockStore(db,scope,boot,wasAdmitted){
    return {first_step_id:step.step_id,step_window_ref,boundary_ref:prior.ref,clock:sample.clock,reference_bundle_ref:proof.bundle_ref,
     utc_interval:{lower_ns:String(proof.lower),upper_ns:String(proof.upper)}};
   },
+  blockBusy(activation,item,time){
+   const prior=clockRecord(item.occurrence_id),step=firstWindow(item);
+   need(db.inTransaction&&prior&&same(time.boundary_ref,prior.ref)&&same(prior.body.activation_ref,activation.ref));
+   finalize(item,activation,step,prior,time.clock,'blocked','run_busy');
+  },
   status(occurrenceId){
    const stopped=db.prepare('SELECT body_jcs,body_digest FROM schedule_occurrence_stop WHERE occurrence_id=?').raw().get(occurrenceId);
    if(stopped){const stop=original(...stopped);return {state:stop.disposition,stop};}

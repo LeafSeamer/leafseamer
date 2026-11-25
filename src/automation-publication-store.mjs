@@ -84,9 +84,9 @@ export function automationPublicationStore({db,service,isOpen,authority,source=n
     need(hash===publication.bundle_digest,'publication_integrity');
    }});
   },
-  versionForRunInTransaction(id,version){
+  versionForRunInTransaction(id,version,{withEvaluator=false}={}){
    need(isOpen()&&db.open&&db.inTransaction,'publication_store_closed');
-   return historical(id,version);
+   return historical(id,version,withEvaluator);
   },
   async publish(authentication,id,request){
    available();checked('LifecycleId',id);const body=checked('LifecyclePublish',request);need(pending<4,'publication_capacity');pending++;

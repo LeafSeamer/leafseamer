@@ -162,7 +162,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    }
    case 'publish':return localSchedules.publish(handle,request.schedule_id,request.version);
    case 'activate':return localSchedules.activate(handle,request.schedule_id,request.activation,scheduleClock);
-   case 'get':return localSchedules.get(handle,request.schedule_id,request.version);
+   case 'get':return localSchedules.get(handle,request.schedule_id,request.version,
+    {readClock:scheduleClock,inspect:runs?.inspectScheduleInTransaction});
    default:fail('local_authorization_request');
   }
  }

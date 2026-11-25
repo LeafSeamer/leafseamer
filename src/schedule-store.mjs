@@ -128,18 +128,30 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
   need(same(proof,authorize(authentication,operation,definitionId,context_id)),'authorization_changed');
   return freeze(result);
  }
+ function timeFor(source,sample){
+  need(admissions&&db.inTransaction,'admission_transaction');
+  const {schedule_id,occurrence_id,activation_ref}=source;
+  need(!admissions.get(occurrence_id),'occurrence_claimed');
+  const activation=readActivation(schedule_id);
+  need(activation&&same(activation.ref,activation_ref),'activation_conflict');
+  const version=readVersion(schedule_id,activation.body.schedule_version_ref.revision);
+  const item=version.body.items.find(item=>item.occurrence_id===occurrence_id);
+  need(item,'admission_occurrence');
+  return {activation,version,item,time:clock.admit(activation,item,sample)};
+ }
+ function openWindow(activation,item,sample){
+  try{return clock.admit(activation,item,sample);}
+  catch(error){if(['schedule_admission_window','schedule_admission_clock'].includes(error?.code))return null;throw error;}
+ }
  return Object.freeze({
-  ...(admissions&&{prepareAdmissionInTransaction(source,run,execution_id,steps,readClock){
+  ...(admissions&&{timeForAdmissionInTransaction(source,sample){return freeze(timeFor(source,sample).time);},
+   prepareAdmissionInTransaction(source,run,execution_id,steps,readClock){
    need(db.inTransaction&&typeof readClock==='function','admission_transaction');
    const {schedule_id,occurrence_id,activation_ref}=source;
-   need(!admissions.get(occurrence_id),'occurrence_claimed');
-   const activation=readActivation(schedule_id);
-   need(activation&&same(activation.ref,activation_ref),'activation_conflict');
-   const version=readVersion(schedule_id,activation.body.schedule_version_ref.revision);
-   const item=version.body.items.find(item=>item.occurrence_id===occurrence_id);
-   need(item&&same(run.scope,scope)&&run.definition_id===version.body.definition_id&&run.definition_version===version.body.definition_version&&
+   const {activation,version,item,time}=timeFor(source,readClock());
+   need(same(run.scope,scope)&&run.definition_id===version.body.definition_id&&run.definition_version===version.body.definition_version&&
     same(run.artifact_ref,version.body.definition_artifact_ref),'admission_artifact');
-   const time=clock.admit(activation,item,readClock()),byStep=new Map(item.step_windows.map(step=>[step.step_id,step]));
+   const byStep=new Map(item.step_windows.map(step=>[step.step_id,step]));
    const first=steps.find(({step})=>step.step_id===time.first_step_id);
    const actions=steps.filter(({step})=>step.kind==='action');
    need(first?.step.kind==='action'&&first.dependencies.length===0&&actions.every(({step,action})=>
@@ -155,13 +167,21 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
     put(insertAdmission.run(occurrence_id,execution_id,schedule_id,pad(activation.ref.revision),text,checksum));
    }});
   }}),
-  ...(clock&&{reconcileClock(readClock){
+  ...(clock&&{reconcileClock(readClock,isBusy=null){
    need(typeof readClock==='function','clock_reader');
    const result=writer(()=>{
     const rows=db.prepare('SELECT DISTINCT schedule_id FROM schedule_activation WHERE schedule_id>? ORDER BY schedule_id COLLATE BINARY LIMIT 8').pluck().all(cursor);
     for(const id of rows){
      const activation=readActivation(id),version=readVersion(id,activation.body.schedule_version_ref.revision);
-     clock.advance(activation,version,readClock());
+     const sample=readClock();
+     clock.advance(activation,version,sample);
+     if(admissions&&sample&&isBusy?.(version.body.definition_id)){
+      for(const item of version.body.items){
+       if(admissions.get(item.occurrence_id))continue;
+       const time=openWindow(activation,item,sample);
+       if(time)clock.blockBusy(activation,item,time);
+      }
+     }
     }
     return rows;
    });
@@ -208,16 +228,28 @@ export function scheduleStore({db,service,bootId,isOpen,authority,publications})
     return activation;
    }));
   },
-  get(authentication,scheduleId,version=null){
+  get(authentication,scheduleId,version=null,{readClock,inspect}={}){
    need(id(scheduleId)&&nullableRevision(version),'request');
    return writer(()=>{
     const bound=definition(scheduleId);need(bound,'missing');
     const proof=authorize(authentication,'getSchedule',bound,null);
     const result={version:readVersion(scheduleId,version),activation:readActivation(scheduleId)};
     need(result.version,'missing');
-    if(clock)result.occurrences=result.version.body.items.map(({occurrence_id})=>{
+    const canInspect=admissions&&readClock&&inspect&&same(result.activation?.body.schedule_version_ref,result.version.ref);
+    let sample;
+    if(clock)result.occurrences=result.version.body.items.map(item=>{
+     const {occurrence_id}=item;
      const row=admissions?.get(occurrence_id);
-     return {occurrence_id,...(row?{state:'accepted',admission:original(...row)}:clock.status(occurrence_id))};
+     if(row)return {occurrence_id,state:'accepted',admission:original(...row)};
+     const status={occurrence_id,...clock.status(occurrence_id)};
+     if(!canInspect||status.state!=='tracking')return status;
+     if(sample===undefined)sample=readClock()??null;
+     const time=sample&&openWindow(result.activation,item,sample);
+     if(!time)return status;
+     const {definition_id,definition_version,definition_artifact_ref}=result.version.body;
+     const qualification=inspect({definition_id,definition_version,definition_artifact_ref,first_step_id:time.first_step_id});
+     return {...status,qualification:{first_step_id:time.first_step_id,observed_tick_ns:time.clock.tick_ns,
+      ...qualification}};
     });
     need(same(proof,authorize(authentication,'getSchedule',bound,null)),'authorization_changed');
     return freeze(result);

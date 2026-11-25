@@ -402,14 +402,14 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  const triggerBinding=inputFor(registration),limits={event_age_limits:[{authority_id:triggerBinding.authority_id,registration_ref:triggerBinding.registration_ref,
   capture_semantics:'event_occurrence',max_age_ms:1001}],max_condition_nodes:20};
  const compare=left=>({kind:'compare',operator:'eq',value_type:boolean,left,right:{kind:'literal',value:true}});
- const condition={kind:'any',items:[compare(reference()),{kind:'all',items:[
+ const condition=commandCase==='r5_schedule'?{kind:'literal',value:true}:{kind:'any',items:[compare(reference()),{kind:'all',items:[
   compare({...reference(),pointer:'/request_observation'}),compare(reference('observation','observation'))]}]};
  const projections=[...input().projections,{pointer:'/request_observation',value_type:boolean,reads:[]}];
  const triggerReview=hasTarget?{condition,policyDigest:digest(limits),extraInputs:[input('observation','observation')],
   ...(stateMachine&&{stateMachine:true}),
   ...(delayCase&&{beforeSteps:[{...delayStep('before-a'),delay_ms:5,max_lateness_ms:10},{...delayStep('before-b'),delay_ms:15,max_lateness_ms:20}]}),
   ...(parameterCase&&{actionParameters:{...(r5Optional&&{required:false,failure_policy:'continue_if_independent'}),parameter_bindings:[{target_pointer:'/value',
-   value:parameterCase==='unknown'?{...reference(),pointer:'/request_observation'}:reference()}],
+   value:commandCase==='r5_schedule'?{kind:'literal',value:true}:parameterCase==='unknown'?{...reference(),pointer:'/request_observation'}:reference()}],
    ...(parameterCase==='guard'&&{guard:{kind:'literal',value:false}})}}),
   ...(executionPlanning&&{extraSteps:[delayStep('after-action')]})}:null;
  const f=setup(t,{revision:schema_revision,withoutActions:!hasTarget,triggerBinding:{...triggerBinding,projections},triggerReview}),{scope,draft}=f,contextId=id(),bootId=f.store.serviceBootId;
@@ -800,9 +800,15 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     assert.deepEqual(decision.arm_completion_ref,ready.completion_ref);
     assert.equal(decision.ingest_revision_before,'2');assert.equal(decision.ingest_revision_after,'3');
     assert.equal(decision.run_revision_before,'4');assert.equal(decision.run_revision_after,'4');assert.equal(decision.execution_id,null);
+    if(commandCase==='r5_schedule')executionGrantDenied=true;
     const exact=await verified.live('2',{value:false,request_observation:false});
     const result=event=>event.trigger_decision_set.decisions.find(value=>value.run_id===run.run_id);
-    assert.equal(result(exact).disposition,'no_match');assert.equal(result(exact).evaluation.outcome,'no_match');
+    if(commandCase==='r5_schedule'){
+     assert.equal(result(exact).reason,'execution_grant_unavailable');
+     executionGrantDenied=false;
+    }else{
+     assert.equal(result(exact).disposition,'no_match');assert.equal(result(exact).evaluation.outcome,'no_match');
+    }
     assert.equal(exact.trigger_decision_set.set.live_evidence.upper_age_ms,1001);
     if(executionPlanning){
      executionGrantDenied=true;
@@ -1109,7 +1115,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          const item={item_id:'programme',one_shot_key:'show',local_start:new Date(sampledAt).toISOString().slice(0,-1),offset:'+00:00',
           steps:[{step_id:'first',role:'on_air',start_offset_ms:0,latest_start_offset_ms:1500}]};
          const input={context:context(),definition_id:draft.definition_id,definition_version:published.definition_version,
-          expected_artifact_ref:published.artifact_ref,expected_version:null,items:[item]};
+          expected_artifact_ref:published.artifact_ref,expected_version:null,items:[item,{...item,item_id:'overlap'}]};
          const version=schedules.publish(null,scheduleId,input);
          const clockDomain={clock_domain_id:'clock_'+'1'.repeat(64),descriptor_digest:digest('schedule domain')};
          const binding={domain:{...scope,...clockDomain}},anchor={binding,anchor_tick_ns:'0',exchange_start_tick_ns:'0',
@@ -1121,7 +1127,26 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          const sample=tick_ns=>({clock:{tick_ns,domain:clockDomain},reference});
          const activation=schedules.activate(null,scheduleId,{context:context(),expected_revision:null,schedule_version_ref:version.ref},()=>sample('500'));
          const occurrence=version.body.items[0],source={schedule_id:scheduleId,occurrence_id:occurrence.occurrence_id,activation_ref:activation.ref,run_id:run.run_id};
-         const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock,()=> 'rule');
+         const admit=(readClock=()=>sample('1020'),fixed=source)=>runs.admitScheduledOccurrence(fixed,readClock);
+         const viewAt=tick=>schedules.get(null,scheduleId,null,{readClock:()=>sample(tick),inspect:runs.inspectScheduleInTransaction}).occurrences[0];
+         assert.equal(viewAt('999').qualification,undefined);
+         assert.deepEqual(viewAt('1020').qualification,{state:'ready_for_preparation',selected_branch:'rule',first_step_id:'first',observed_tick_ns:'1020'});
+         const {leaves:[listener],ca}=peerCertificates();
+         const app=await startDraftHttp({cert:listener.cert,key:listener.key,bindingId:id(),service:assembly.service,bootId:boot,
+          receiver:{async prepare(){return null;}},authorization:{},drafts:{},runs,localSchedules:schedules,scheduleClock:()=>sample('1020')});
+         try{
+          const body=Buffer.from(canonical({operation:'get',request:{schedule_id:scheduleId,version:null}}));
+          const reply=await new Promise((resolve,reject)=>{
+           const request=https.request(new URL('/auth/local-schedules/v1',app.origin),{method:'POST',ca,agent:false,
+            headers:{Authorization:'Bearer v1.'+id()+'.'+'A'.repeat(43),'Content-Type':'application/json','Content-Length':body.length}},response=>{
+            const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('error',reject);
+            response.on('end',()=>resolve({status:response.statusCode,body:JSON.parse(Buffer.concat(chunks))}));
+           });
+           request.on('error',reject);request.end(body);
+          });
+          assert.equal(reply.status,200);
+          assert.deepEqual(reply.body.result.occurrences[0],viewAt('1020'));
+         }finally{await app.close();}
          const untouched=()=>{
           assert.equal(db.prepare('SELECT count(*) FROM automation_execution').pluck().get(),1);
           assert.equal(db.prepare('SELECT count(*) FROM schedule_execution_admission').pluck().get(),0);
@@ -1134,7 +1159,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          await assert.rejects(admit(),{code:'execution_schedule_grant'});
          executionGrantDenied=false;
          let reads=0;
-         await assert.rejects(admit(()=>sample(reads++?'10000':'1020')),{code:'schedule_admission_clock'});
+         await assert.rejects(admit(()=>sample(reads++>=2?'10000':'1020')),{code:'schedule_admission_clock'});
+         assert.equal(reads,3);
          untouched();
          db.exec("CREATE TEMP TRIGGER omit_schedule_claim BEFORE INSERT ON schedule_execution_admission BEGIN SELECT RAISE(IGNORE); END");
          await assert.rejects(admit(),{code:'schedule_storage'});
@@ -1156,13 +1182,17 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          assert.equal(runs.get(null,run.run_id).revision,'7');
          await assert.rejects(admit(),{code:'execution_schedule_run'});
          assert.equal(result(await verified.live('5',{value:true})).disposition,'suppressed_busy');
+         schedules.reconcileClock(()=>sample('1020'),runs.isScheduleSlotBusyInTransaction);
+         const overlap=schedules.get(null,scheduleId).occurrences[1];
+         assert.equal(overlap.state,'blocked');
+         assert.equal(overlap.stop.reason,'run_busy');
          const next=schedules.publish(null,scheduleId,{...input,context:context(),expected_version:'1',
           items:[{...item,local_start:new Date(sampledAt+60000).toISOString().slice(0,-1)}]});
          schedules.activate(null,scheduleId,{context:context(),expected_revision:'1',schedule_version_ref:next.ref});
          schedules.reconcileClock(()=>null);
          const occurrenceView={occurrence_id:occurrence.occurrence_id,state:'accepted',admission:accepted.admission};
          assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
-         assert.equal(db.prepare('SELECT count(*) FROM schedule_occurrence_stop').pluck().get(),0);
+         assert.deepEqual(schedules.get(null,scheduleId,'1').occurrences,[occurrenceView,overlap]);
          assert.equal(commandSubmits,1);
          assert.deepEqual(db.pragma('foreign_key_check'),[]);
          inspect(f.dir,reopened=>{
