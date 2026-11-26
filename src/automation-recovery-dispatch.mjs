@@ -31,6 +31,21 @@ export function recoveryStepEvidence(steps,step,clock){
  return {terminals,windows};
 }
 
+export function recoveryCompletionEvidence(steps){
+ const evidence=[];
+ for(const {item,plan,elapsed,submission,source_step} of steps){
+  const retained=item.decision==='retain_success';
+  const terminal=(retained?source_step.submission:submission)?.terminal;
+  const delay=retained?source_step.elapsed:elapsed;
+  if(plan.payload.kind==='delay'?!delay:terminal?.state.outcome!=='succeeded')return null;
+  if(retained)need(same(item.completion_evidence_refs,delay?[delay.ref]:terminal.state.completion_evidence_refs),
+   'run_recovery_dispatch_integrity');
+  evidence.push({step_id:plan.step_id,decision:item.decision,outcome:'succeeded',
+   evidence_digest:delay?delay.ref.digest:digest(terminal)});
+ }
+ return evidence;
+}
+
 export function automationRecoveryDispatchStore(db,{withDelays=false}={}){
  const submissions=automationSubmissionStore(db,{withTerminals:true,recovery:true});
  const originals=db.prepare('SELECT step_id,body_jcs,body_digest,ready_jcs,ready_digest FROM automation_recovery_dispatch_action_parameters WHERE execution_id=?').raw();

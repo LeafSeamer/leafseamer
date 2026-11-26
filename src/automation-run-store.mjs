@@ -19,7 +19,7 @@ import {automationExecutionCommit,completionEvidence,mayContinueAfterFailure,nex
 import {automationRecoveryPreviewStore,recoveryPlan} from './automation-recovery-preview.mjs';
 import {automationRecoveryOperationStore,recoveryReceipt} from './automation-recovery-operation.mjs';
 import {automationRecoveryPreparationStore} from './automation-recovery-preparation.mjs';
-import {automationRecoveryDispatchStore,recoveryStepEvidence} from './automation-recovery-dispatch.mjs';
+import {automationRecoveryDispatchStore,recoveryCompletionEvidence,recoveryStepEvidence} from './automation-recovery-dispatch.mjs';
 
 const fields=(value,names)=>value&&Object.keys(value).sort().join(',')===names;
 const view=({last_receive_cursor,ingest_revision,dependency_digest,run_arm_completion_ref,arm_source_baselines,trigger_pause_revision,...run})=>({...run,last_receive_seq:last_receive_cursor.receive_sequence});
@@ -158,6 +158,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const recoveryPreparations=Number(service.schema_revision)>=42?
   automationRecoveryPreparationStore(db,{withBinding:Number(service.schema_revision)>=43,withStart:Number(service.schema_revision)>=44}):null;
  const recoveryDispatch=Number(service.schema_revision)>=45?automationRecoveryDispatchStore(db,{withDelays:Number(service.schema_revision)>=46}):null;
+ const recoveryCommits=Number(service.schema_revision)>=47?automationExecutionCommit(db,{recovery:true}):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
  const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules,withScheduledRuntime}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
@@ -166,8 +167,12 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  function slotFor(definitionId){
   const slot=arm.slot(definitionId);
   if(!executionCommits||slot.active_run_id===null)return slot;
-  const revision=activeSlotRevision.get(definitionId)??executionCommits.latest(slot.active_run_id)?.body.slot_revision??slot.revision;
+  const revision=activeSlotRevision.get(definitionId)??latestExecutionCommit(slot.active_run_id)?.slot_revision??slot.revision;
   return {...slot,revision};
+ }
+ function latestExecutionCommit(runId){
+  const ordinary=executionCommits?.latest(runId)?.body,recovered=recoveryCommits?.latest(runId)?.body;
+  return recovered&&(!ordinary||BigInt(recovered.run_revision_after)>BigInt(ordinary.run_revision_after))?recovered:ordinary;
  }
  const delayTimers=new Map(),delayFailures=new Set();
  const actionReaders=new Map(),submitting=new Set();
@@ -195,8 +200,9 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   if(ready){
    const latch=approvals.armRevocationLatch(reserved.approval_ref),revision=ready.completion.completed_run_revision;
    const baseline=ready.completion.ingest_baseline;
-   const committed=executionCommits?.latest(run.run_id)?.body;
-   if(committed)need(committed.arm_generation===reserved.target_arm_generation&&same(committed.artifact_ref,run.artifact_ref),'execution_commit_integrity');
+   const committed=latestExecutionCommit(run.run_id),recovered=Boolean(committed?.operation_ref);
+   if(committed)need((recovered?BigInt(committed.arm_generation)>BigInt(reserved.target_arm_generation):
+    committed.arm_generation===reserved.target_arm_generation)&&same(committed.artifact_ref,run.artifact_ref),'execution_commit_integrity');
    const projected={...run,lifecycle:latch?'paused':'armed',active_operation_id:null,arm_generation:reserved.target_arm_generation,
     ...(committed&&{business_state:committed.business_state_after,last_execution_id:committed.execution_ref.object_id}),
     ...(baseline&&{last_receive_cursor:baseline.receive_cursor,ingest_revision:baseline.revision,run_arm_completion_ref:ready.completion_ref,
@@ -210,10 +216,13 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     projected.lifecycle=latch||protectedExecution?'paused':'running';
     if(protectedExecution)projected.pause_latches=[...projected.pause_latches,active.execution_id];
    }
-   const progress=readIngestProgress(projected),currentRevision=progress?.trigger_pause_revision??active?.run_revision??committed?.run_revision_after??revision;
-   need(BigInt(currentRevision)>=BigInt(revision)&&(latch?BigInt(run.revision)>BigInt(currentRevision):run.revision===currentRevision),'run_arm_completion_integrity');
+   const progress=readIngestProgress(projected);
+   const beforeRecovery=progress?.trigger_pause_revision??active?.run_revision??committed?.run_revision_after??revision;
+   const currentRevision=recovered&&BigInt(committed.run_revision_after)>BigInt(beforeRecovery)?committed.run_revision_after:beforeRecovery;
+   const expected=BigInt(currentRevision),actual=BigInt(run.revision);
+   need(expected>=BigInt(revision)&&(latch?actual>expected||recovered&&actual===expected:actual===expected),'run_arm_completion_integrity');
    const current=withIngestProgress(projected,progress),recovery=recoveries?.active(run.run_id);
-   if(!recovery)return current;
+   if(!recovery)return recovered?{...current,lifecycle:'paused',arm_generation:committed.arm_generation}:current;
    const {operation}=recovery;
    need(current.lifecycle==='paused'&&same(executionHead?.execution_ref,operation.source_execution_ref)&&
     BigInt(current.revision)>=BigInt(operation.committed_run_revision),'run_recovery_operation_integrity');
@@ -1551,7 +1560,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  function recoveryPreparationState(original){
   const {operation,operation_ref}=original,run=currentRun(proposalRun(operation.run_id));
   const basis=recoveryApprovalBasis(proposalRun(run.run_id));
-  need(same(basis?.operation_ref,operation_ref)&&original.execution.mode==='execute'&&
+  const {mode}=original.execution;
+  need(same(basis?.operation_ref,operation_ref)&&(mode==='execute'||recoveryCommits&&mode==='reconcile_commit')&&
    slotFor(run.definition_id).active_run_id===run.run_id,'run_recovery_preparation_changed');
   need(publicationBasisCurrent(run),'run_publication_binding_unapproved');
   const approval=approvals.currentAuthorityInTransaction(run);
@@ -1809,8 +1819,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  }
  function recoveryStartSteps(original,registration,grants){
   const previous=executions.read(original.operation.source_execution_ref.object_id);
-  need(same(previous?.execution_ref,original.operation.source_execution_ref)&&original.plan.mode==='execute'&&
-   previous.execution.origin_kind==='trigger'&&original.plan.items.length===previous.steps.length,'run_recovery_preparation_changed');
+  const {mode,items}=original.plan;
+  need(same(previous?.execution_ref,original.operation.source_execution_ref)&&items.length===previous.steps.length&&
+   (mode==='execute'&&previous.execution.origin_kind==='trigger'||recoveryCommits&&mode==='reconcile_commit'&&
+    items.every(item=>item.decision==='retain_success')),'run_recovery_preparation_changed');
   return original.plan.items.map((item,index)=>{
    const {plan}=previous.steps[index];
    need(item.step_id===plan.step_id&&item.plan_digest===digest(plan)&&['retain_success','execute_new'].includes(item.decision),
@@ -1846,10 +1858,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   need(same(previous?.execution_ref,operation.source_execution_ref)&&
    same(start.steps,recoveryStartSteps(recovery,registration,bound.binding.grants)),'run_recovery_dispatch_integrity');
   const steps=start.steps.map((item,index)=>{
-   const {plan:source_step_plan,prepared_parameters:source_parameters}=previous.steps[index];
+   const source_step=previous.steps[index],{plan:source_step_plan,prepared_parameters:source_parameters}=source_step;
    const plan={...source_step_plan,execution_id:executionId};
    if(item.grant_ref)plan.payload={...plan.payload,binding:{...plan.payload.binding,grant_ref:item.grant_ref}};
-   return {item,plan,source_step_plan,source_parameters:source_parameters??null};
+   return {item,plan,source_step,source_step_plan,source_parameters:source_parameters??null};
   });
   const execution={format:'leafseamer.recovery-action-execution/1',origin_kind:'recovery',execution_id:executionId,scope,
    run_id:operation.run_id,definition_version:registration.plans[0].request.definition_version,
@@ -1858,7 +1870,11 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    steps:steps.map(({plan})=>({step_id:plan.step_id,plan_digest:digest(plan)})),
    grant_basis:bound.binding.grants.map(member=>({...member,eligible_before_ns:start.eligible_before_ns})),approved_before_ns:start.eligible_before_ns};
   const execution_ref={kind:'execution',scope,object_id:executionId,revision:'2',digest:digest(execution)};
-  return recoveryDispatch.read({execution,execution_ref,steps,recovery,registration,bound,started,source:previous.execution});
+  const value=recoveryDispatch.read({execution,execution_ref,steps,recovery,registration,bound,started,source:previous.execution});
+  const completion=recoveryCommits?.read(executionId)??null;
+  if(completion)need(same(completion.body.execution_ref,execution_ref)&&same(completion.body.steps,recoveryCompletionEvidence(value.steps))&&
+   same(completion.body.operation_ref,recovery.operation_ref)&&same(completion.body.start_ref,start_ref),'execution_commit_integrity');
+  return {...value,completion};
  }
  function recoveryCanRun(recovery,revision){
   const original=recoveryPreparations.start(recovery);
@@ -1924,11 +1940,70 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   },100).unref();
   delayTimers.set(id,timer);
  }
+ async function settleRecovery(initial){
+  const {execution,execution_ref,recovery,registration,started,source}=initial;
+  const {execution_id:id,run_id}=execution,{operation,operation_ref}=recovery,{start,start_ref}=started;
+  const {snapshot}=writer(()=>recoveryPreviews.read(operation.preview_ref).preview);
+  const bundle=publications.prepareExecutionProgram(snapshot.definition_id,snapshot.definition_version),{publication}=bundle;
+  const targets=execution.grant_basis.map(({lookup,receipt_ref,grant_ref,pairing_ref},index)=>({
+   request:{lookup,receipt_ref,grant_ref},pairing_ref,plan:registration.plans[index]
+  }));
+  const [observations,transports]=await Promise.all([
+   inBatches(targets,({request,pairing_ref})=>observeRecoveryPreparation(pairing_ref.id,structuredClone(request))),
+   readArmSourceTransports(snapshot.sources)
+  ]);
+  if(!recoveryDispatchLive())return;
+  writer(()=>{
+   const value=readRecoveryDispatch(id);
+   if(value?.completion)return;
+   need(value&&!value.protection&&same(value.execution_ref,execution_ref)&&same(value.started,started),'execution_commit_changed');
+   assertRecoveryDispatchBasis(value,snapshot,transports);
+   const {run,approval}=recoveryPreparationState(recovery);
+   const evidence=recoveryCompletionEvidence(value.steps),slot=slotFor(run.definition_id);
+   need(evidence&&run.active_execution_id===id&&run.active_operation_id===operation.operation_id&&
+    run.arm_generation===start.arm_generation&&slot.active_run_id===run_id&&
+    slot.revision===source.activation_slot_revision&&same(source.business_state,run.business_state)&&
+    same(run.artifact_ref,source.artifact_ref)&&same(run.artifact_ref,publication.result.artifact_ref)&&
+    snapshot.unresolved_latch_ids.length===0,'execution_commit_evidence');
+   const target=targetState(publication,run.business_state,source.selected_branch);
+   need(target===source.target_state_id,'execution_commit_state');
+   function verify(first){
+    bundle.assertOriginalInTransaction();
+    need(publicationBasisCurrent(run,publication)&&same(resolveAutomationSourcesInTransaction(readDependencies(run).body.dependencies.inputs),
+     snapshot.sources.map(({transport,...item})=>item)),'execution_commit_changed');
+    assertArmSourceTransports(snapshot.sources,transports);
+    const deadlines=targets.flatMap((member,index)=>{
+     const proof=observations[index],{original}=proof,pair=armPlanPair(member.plan);
+     need(original.state==='eligible'&&same(original.request,member.request)&&same(pairingReference(pair),member.pairing_ref)&&
+      proof.assertCurrentInTransaction()===true,'execution_commit_grant');
+     return [original.eligible_before_ns,pair.expires_ns];
+    });
+    const {authentication}=registration;
+    deadlines.push(authentication.credential.recent_before_ns,proposalWindowEnd(approval.saved.proposal),
+     authority.assertArmInitiatorInTransaction(operation.initiator,run.definition_id,authentication.grant_ref,'run.resume'));
+    const clock=recoveryStartClock(start);
+    need(deadlines.every(end=>BigInt(clock.upper_ns)<BigInt(end))&&
+     (!first||BigInt(clock.tick_ns)>=BigInt(first.tick_ns)&&BigInt(clock.tick_ns)<BigInt(first.valid_before_tick_ns)),
+    'execution_commit_grant');
+    return clock;
+   }
+   const clock=verify(),business_state_after=target===null?null:{state_id:target,revision:nextExecutionRevision(run.business_state.revision)};
+   const budget=arm.forRun(proposalRun(run_id)).operation.budget.required;
+   recoveryCommits.write({format:'leafseamer.recovery-execution-commit/1',execution_ref,operation_ref,start_ref,
+    source_execution_ref:operation.source_execution_ref,run_id,artifact_ref:run.artifact_ref,arm_generation:run.arm_generation,
+    approval_ref:start.approval_ref,slot_revision:start.slot_revision,run_revision_before:run.revision,run_revision_after:nextExecutionRevision(run.revision),
+    business_state_before:run.business_state,business_state_after,source_digest:digest(snapshot.sources),
+    receive_cursor:run.last_receive_cursor,ingest_revision:run.ingest_revision,clock,steps:evidence},
+   bytes=>recoveryDispatch.reserve(id,budget,bytes,1));
+   verify(clock);
+  });
+ }
  async function dispatchRecovery(id){
   const initial=writer(()=>{
    const value=readRecoveryDispatch(id);
-   if(!value||value.protection||value.execution.service_boot_id!==bootId||
+   if(!value||value.completion||value.protection||value.execution.service_boot_id!==bootId||
     value.steps.some(step=>step.submission?.attempt&&!step.submission.terminal))return null;
+   if(recoveryCommits&&recoveryCompletionEvidence(value.steps))return {settle:true,value};
    const pending=value.steps.filter(step=>step.item.decision==='execute_new'&&
     (step.item.grant_ref?!step.submission&&!step.ready:recoveryDispatch.writeDelay&&step.plan.payload.kind==='delay'&&!step.elapsed));
    if(!pending.length)return null;
@@ -1947,6 +2022,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {wait};
   });
   if(!initial)return;
+  if(initial.settle)return settleRecovery(initial.value);
   if(!initial.step)return initial.wait;
   const {recovery,registration,execution,execution_ref,started}=initial.value,stepId=initial.step.plan.step_id;
   const {snapshot}=writer(()=>recoveryPreviews.read(recovery.operation.preview_ref).preview);
@@ -2182,9 +2258,12 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     if(started){
      const dispatched=recoveryDispatch&&readRecoveryDispatch(executionId);
      const run=currentRun(proposalRun(recovery.operation.run_id));
-     const protection=run.lifecycle==='running'?null:dispatched?.protection??(!recoveryDispatch?'recovery_dispatch_pending':
+     const completion=dispatched?.completion??null;
+     const protection=completion||run.lifecycle==='running'?null:dispatched?.protection??(!recoveryDispatch?'recovery_dispatch_pending':
       started.start.service_boot_id!==bootId?'recovery_restart_protected':'recovery_dispatch_inactive');
-     return {execution,execution_ref,plan,steps:started.start.steps,start:started,protection,completion:null,...(dispatched&&{dispatch:{
+     return {execution,execution_ref,plan,steps:started.start.steps,start:started,protection,completion,
+      ...(recoveryCommits&&{reconciliation_required:!completion&&Boolean(protection&&dispatched&&recoveryCompletionEvidence(dispatched.steps))}),
+      ...(dispatched&&{dispatch:{
       execution_ref:dispatched.execution_ref,steps:dispatched.steps.map(({item,prepared_parameters,submission,window,elapsed})=>({step_id:item.step_id,
        parameters_ref:prepared_parameters?.ref??null,submission,...(recoveryDispatch.writeDelay&&{delay_window:window,delay_elapsed:elapsed})}))
      }})};
@@ -2197,7 +2276,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const protectedResult=delayFailures.has(executionId)?{...result,protection:'execution_runtime_unavailable'}:result;
    if(!executionCommits)return protectedResult;
    const completion=executionCommits.read(executionId);
-   return {...protectedResult,completion,reconciliation_required:!completion&&result.execution.activation_slot_revision!==undefined&&
+   const recovered=recoveryCommits?.forSource(executionId);
+   const recovery_completion_ref=recovered&&{...recovered.body.execution_ref,kind:'execution_commit',revision:'1',digest:recovered.digest};
+   return {...protectedResult,completion,...(recovered&&{recovery_completion_ref}),
+    reconciliation_required:!completion&&!recovered&&result.execution.activation_slot_revision!==undefined&&
     Boolean(protectedResult.protection||result.execution.service_boot_id!==bootId)&&completionEvidence(result.steps)!==null};
   });}}),
   ...(executionCommits&&{inspectRecoveryEvidence(authentication,runId,executionId){
@@ -2224,7 +2306,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     visibleRecovery(authentication,runId);
     const original=recoveries.read(operationId);
     need(original?.operation.run_id===runId,'run_recovery_operation_missing');
-    return recoveryReceipt(original);
+    const completion=recoveryCommits?.read(original.execution.execution_id);
+    return {...recoveryReceipt(original),...(completion&&{completion})};
    });
   },lookupRecoveryOperation(authentication,runId,{context_id,idempotency_key}){
    for(const value of [runId,context_id,idempotency_key])checked('LifecycleId',value);

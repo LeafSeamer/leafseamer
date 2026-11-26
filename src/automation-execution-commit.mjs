@@ -28,21 +28,32 @@ export function completionEvidence(steps){
  return evidence;
 }
 
-export function automationExecutionCommit(db){
- const select=`SELECT c.execution_id,c.run_id,c.run_revision,c.slot_revision,c.body_jcs,c.body_digest,
-  c.audit_jcs,c.notification_jcs,e.body_digest FROM automation_execution_commit c JOIN automation_execution e USING(execution_id)`;
+export function automationExecutionCommit(db,{recovery=false}={}){
+ const select=recovery?
+  `SELECT c.execution_id,c.run_id,c.run_revision,c.slot_revision,c.body_jcs,c.body_digest,c.audit_jcs,c.notification_jcs,
+   s.body_digest,c.operation_id,c.source_execution_id,p.body_digest,l.released_by
+   FROM automation_recovery_execution_commit c JOIN automation_recovery_start s USING(operation_id)
+   JOIN automation_recovery_lock l USING(operation_id)
+   JOIN automation_execution p ON p.execution_id=c.source_execution_id`:
+  `SELECT c.execution_id,c.run_id,c.run_revision,c.slot_revision,c.body_jcs,c.body_digest,
+   c.audit_jcs,c.notification_jcs,e.body_digest FROM automation_execution_commit c JOIN automation_execution e USING(execution_id)`;
  const byId=db.prepare(select+' WHERE c.execution_id=?').raw();
  const byRun=db.prepare(select+' WHERE c.run_id=? ORDER BY length(c.run_revision) DESC,c.run_revision DESC LIMIT 1').raw();
- const insert=db.prepare('INSERT INTO automation_execution_commit VALUES(?,?,?,?,?,?,?,?)');
- const audit=(body,hash)=>({kind:'execution_completed',execution_ref:body.execution_ref,commit_digest:hash});
+ const bySource=recovery&&db.prepare(select+' WHERE c.source_execution_id=?').raw();
+ const insert=db.prepare(recovery?'INSERT INTO automation_recovery_execution_commit VALUES(?,?,?,?,?,?,?,?,?,?)':
+  'INSERT INTO automation_execution_commit VALUES(?,?,?,?,?,?,?,?)');
+ const audit=(body,hash)=>({kind:'execution_completed',execution_ref:body.execution_ref,commit_digest:hash,
+  ...(recovery&&{operation_ref:body.operation_ref,source_execution_ref:body.source_execution_ref})});
  const notification=(body,hash)=>({kind:'transition_committed',event_id:`${body.execution_ref.object_id}.completed`,
   run_id:body.run_id,run_revision:body.run_revision_after,commit_digest:hash});
  function decode(row){
   if(!row)return null;
-  const [id,runId,revision,slot,text,hash,auditText,noticeText,executionHash]=row;
+  const [id,runId,revision,slot,text,hash,auditText,noticeText,originalHash,operationId,sourceId,sourceHash,release]=row;
   const body=JSON.parse(text);
-  need(canonical(body)===text&&digest(body)===hash&&body.format==='leafseamer.execution-commit/1'&&
-   body.execution_ref.object_id===id&&body.execution_ref.digest===executionHash&&body.run_id===runId&&
+  const original=recovery?body.format==='leafseamer.recovery-execution-commit/1'&&body.start_ref.digest===originalHash&&
+   body.operation_ref.object_id===operationId&&body.source_execution_ref.object_id===sourceId&&body.source_execution_ref.digest===sourceHash&&release===hash:
+   body.format==='leafseamer.execution-commit/1'&&body.execution_ref.digest===originalHash;
+  need(canonical(body)===text&&digest(body)===hash&&original&&body.execution_ref.object_id===id&&body.run_id===runId&&
    body.run_revision_after===revision&&revision===nextExecutionRevision(body.run_revision_before)&&body.slot_revision===slot&&
    canonical(audit(body,hash))===auditText&&canonical(notification(body,hash))===noticeText,'execution_commit_integrity');
   return {body,digest:hash,notification:notification(body,hash)};
@@ -52,7 +63,9 @@ export function automationExecutionCommit(db){
   const {execution_ref,run_id,run_revision_after,slot_revision}=body,hash=digest(body);
   const bytes=[canonical(body),canonical(audit(body,hash)),canonical(notification(body,hash))];
   charge(bytes.reduce((size,text)=>size+Buffer.byteLength(text),0));
-  need(insert.run(execution_ref.object_id,run_id,run_revision_after,slot_revision,bytes[0],hash,bytes[1],bytes[2]).changes===1,'execution_commit_storage');
+  const owner=recovery?[body.operation_ref.object_id,body.source_execution_ref.object_id]:[];
+  need(insert.run(execution_ref.object_id,...owner,run_id,run_revision_after,slot_revision,bytes[0],hash,bytes[1],bytes[2]).changes===1,'execution_commit_storage');
  }
- return Object.freeze({read:id=>decode(byId.get(id)),latest:runId=>decode(byRun.get(runId)),write});
+ return Object.freeze({read:id=>decode(byId.get(id)),latest:runId=>decode(byRun.get(runId)),write,
+  ...(recovery&&{forSource:id=>decode(bySource.get(id))})});
 }

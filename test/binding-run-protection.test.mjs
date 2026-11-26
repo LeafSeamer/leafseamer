@@ -399,20 +399,25 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['人员恢复执行提供真实配对动作并按原命令查回丢失响应','45',null,'validated','recovery_dispatch'],
  ['恢复延时在原窗口释放直接后继','46',null,'validated','recovery_delay'],
  ['恢复延时达到截止时保护且不提交后继','46',null,'validated','recovery_delay_late'],
+ ['恢复结算原子提交目标状态并释放活动执行','47',null,'validated','recovery_settle_success'],
+ ['恢复结算槽释放失败时回滚且保留终态','47',null,'validated','recovery_settle_rollback'],
+ ['恢复结算可显式采用全套历史成功证据','47',null,'validated','recovery_settle_reconcile'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
 ])test('布防受理、回执采用和最终提交保留同一操作：'+label,async t=>{
  const registration=eventRegistration(),hasTarget=schema_revision!=='16',executionPlanning=Number(schema_revision)>=25;
  const withTerminals=Number(schema_revision)>=30;
- const delayRecovery=commandCase?.startsWith('recovery_delay'),lateRecoveryDelay=commandCase==='recovery_delay_late';
- const dispatchRecovery=delayRecovery||commandCase==='recovery_dispatch',recoveryReserved=dispatchRecovery||commandCase==='recovery_reserved';
+ const settling=commandCase?.startsWith('recovery_settle'),settlementRollback=commandCase==='recovery_settle_rollback';
+ const reconcileRecovery=commandCase==='recovery_settle_reconcile';
+ const delayRecovery=commandCase?.startsWith('recovery_delay')||settling&&!reconcileRecovery,lateRecoveryDelay=commandCase==='recovery_delay_late';
+ const dispatchRecovery=settling||delayRecovery||commandCase==='recovery_dispatch',recoveryReserved=dispatchRecovery||commandCase==='recovery_reserved';
  const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5MissingRelease=commandCase==='r5_missing_release';
  const r5Optional=commandCase==='r5_optional'||r5MissingRelease;
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
  const scheduledRestart=commandCase==='r5_scheduled_restart';
  const scheduledRuntime=scheduledRestart||commandCase==='r5_scheduled_runtime',scheduleCase=scheduledRuntime||commandCase==='r5_schedule';
- const stateMachine=['r5_state','r5_notification'].includes(commandCase)||r5Protected;
+ const stateMachine=['r5_state','r5_notification'].includes(commandCase)||r5Protected||settling;
  const withAnchors=Number(schema_revision)>=26,omitReady=label==='提交后就绪失败保持保护';
  const triggerBinding=inputFor(registration),limits={event_age_limits:[{authority_id:triggerBinding.authority_id,registration_ref:triggerBinding.registration_ref,
   capture_semantics:'event_occurrence',max_age_ms:1001}],max_condition_nodes:20};
@@ -494,7 +499,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   let approvalEndorsementForRecovery=null;
   let recoveryCommand=null,recoveryAdjudication=null,recoveryCommandSocket=null,recoveryCommandCalls=0,recoveryCommandReads=0;
   const delayCommands=new Map();
-  let triggerOriginal=null,returnRecoveryTerminal=false,afterWaitEvidence=null;
+  let triggerOriginal=null,returnRecoveryTerminal=false,returnFollowUpTerminal=false,afterWaitEvidence=null;
   let recoveryGrantCurrent=true,recoveryGrantReads=0,loseRecoveryQualification=false;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
@@ -735,7 +740,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
        completion_evidence_refs:[record('completed')],resource_evidence_refs:[record('released')]};
       const terminal={format:'leafseamer.automation-command-terminal/1',command_ref,state,record_ref:{...command_ref,revision:'2',digest:digest(state)},
        state_ref:{id:command_ref.object_id+'_state_2',revision:'2',digest:digest(state)},completion_achieved:'effect_verified'};
-      return {adjudication,terminal:returnRecoveryTerminal?terminal:null};
+      return {adjudication,terminal:returnRecoveryTerminal&&(!settling||request.action.step_id!=='after-wait'||returnFollowUpTerminal)?terminal:null};
      }
      assert.deepEqual(request,sentCommand);terminalReads++;
      return {adjudication:savedAdjudication,terminal:terminalReply};
@@ -1159,9 +1164,10 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          if(withTerminals){
           const readResult=()=>seamerTransport.readAutomationCommandResult(pairing.binding_id,sentCommand);
           assert.deepEqual(await readResult(),{adjudication:savedAdjudication,terminal:null});
-          const activeDependency=commandCase==='terminal_dependency'||r5;
+          const activeDependency=commandCase==='terminal_dependency'||r5||reconcileRecovery;
           const afterProtection=commandCase==='terminal_after_protection';
-          const suppliedSuccess=!['terminal_unknown','terminal_reconciled'].includes(commandCase)&&!recoveryReserved&&!r5Optional,command_ref=savedAdjudication.command_ref;
+          const suppliedSuccess=reconcileRecovery||!['terminal_unknown','terminal_reconciled'].includes(commandCase)&&!recoveryReserved&&!r5Optional;
+          const command_ref=savedAdjudication.command_ref;
           const evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
           const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',
            outcome:suppliedSuccess?'succeeded':r5Optional?'failed':recoveryReserved?'blocked':'unknown',effect_status:suppliedSuccess?'verified':r5Optional||recoveryReserved?'not_sent':'possible',
@@ -1180,7 +1186,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            await poll(value=>value.protection==='execution_runtime_unavailable');
            sourceChanged=false;
           }
-          if(r5Rollback)db.exec('CREATE TEMP TRIGGER omit_execution_release BEFORE DELETE ON automation_execution_head BEGIN SELECT RAISE(IGNORE); END');
+          if(r5Rollback||reconcileRecovery)db.exec('CREATE TEMP TRIGGER omit_execution_release BEFORE DELETE ON automation_execution_head BEGIN SELECT RAISE(IGNORE); END');
           if(r5GrantRevoked)executionGrantDenied=true;
           terminalReply=terminal;
           const waitForTerminal=async condition=>{
@@ -1204,19 +1210,20 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           }
           if(!activeDependency)recovered.startSubmissionRecovery();
           const observed=await waitForTerminal(value=>r5MissingRelease?value.protection&&readStep(value).submission.terminal:
-           r5?(r5Protected?value.reconciliation_required:value.completion):
+           r5||reconcileRecovery?(r5Protected||reconcileRecovery?value.reconciliation_required:value.completion):
            activeDependency?value.steps[1].elapsed:readStep(value).submission.terminal);
           assert.deepEqual(readStep(observed).submission.terminal,terminal);
-          assert.equal(observed.protection,(suppliedSuccess||r5Optional)&&!afterProtection&&!r5Protected&&!r5MissingRelease?null:'execution_runtime_unavailable');
+          assert.equal(observed.protection,(suppliedSuccess||r5Optional)&&!afterProtection&&!r5Protected&&!r5MissingRelease&&!reconcileRecovery?null:'execution_runtime_unavailable');
           if(activeDependency&&!r5MissingRelease){
            assert.deepEqual(observed.steps[1].ready.body.command_terminal_refs,[{step_id:'first',terminal_digest:digest(terminal)}]);
            assert.deepEqual(observed.steps[1].window.body.execution_anchor_ref,observed.anchor.ref);
            assert.equal(observed.steps[1].window.body.anchor_tick_ns,observed.anchor.body.clock.tick_ns);
-           if(!r5)runs.stopExecutionTimers();
+           if(!r5&&!reconcileRecovery)runs.stopExecutionTimers();
           }else assert.equal(observed.steps[1].ready,null);
           assert.equal(commandSubmits,1);
           assert.throws(()=>db.exec('DELETE FROM automation_execution_command_terminal'),/immutable_execution_command_terminal/);
           originalExecution=observed;
+          if(reconcileRecovery)db.exec('DROP TRIGGER omit_execution_release');
          }
          assert.throws(()=>db.exec(`DELETE FROM ${table}`),/immutable_execution_submission_attempt/);
         }finally{recovered.stopExecutionTimers();readDb.close();}
@@ -1228,7 +1235,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         assert.equal(initial.observed_protection,null);
         assert.deepEqual(initial.steps,[{step_id:'first',controller_scope:target,device_id:action.device_id,
          submission_digest:submission.digest,submission_state:'accepted',command_ref:submission.adjudication.command_ref,
-         terminal:{state_ref:submission.terminal.state_ref,outcome:r5MissingRelease?'failed':recoveryReserved?'blocked':'unknown',
+         terminal:{state_ref:submission.terminal.state_ref,outcome:r5MissingRelease?'failed':reconcileRecovery?'succeeded':recoveryReserved?'blocked':'unknown',
           resource_status:r5MissingRelease||recoveryReserved?'clear':'unresolved',resource_evidence_refs:submission.terminal.state.resource_evidence_refs}},
          ...(delayRecovery?[{step_id:'after-wait',controller_scope:target,device_id:action.device_id,submission_digest:null,
           submission_state:'not_recorded',command_ref:null,terminal:null}]:[])]);
@@ -1302,7 +1309,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(await preflight(),readPreflight('verified','released',resource));
           const previewResult=await httpsRead({...request,expected_revision:expected.run_revision},'preview-recovery');
           assert.equal(previewResult.status,200,JSON.stringify(previewResult.body));
-          assert.equal(previewResult.body.result.preview.plan.mode,'execute',JSON.stringify(previewResult.body.result.preview));
+          assert.equal(previewResult.body.result.preview.plan.mode,reconcileRecovery?'reconcile_commit':'execute',JSON.stringify(previewResult.body.result.preview));
           const {preview_ref}=previewResult.body.result;
           const resume={run_id:run.run_id,reservation:{context:{context_id:contextId,idempotency_key:id()},preview_ref,expected_revision:expected.run_revision}};
           const submit=payload=>httpsRead(payload,'resume');
@@ -1510,11 +1517,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.equal(start.run_revision,'9');
           assert.equal(start.dispatch_eligible,false);
           const expectedSteps=previewResult.body.result.preview.plan.items.map(item=>({...item,
-           grant_ref:item.step_id==='after-action'?null:recoveryRemoteReceipt.applied_receipt.grant_ref}));
+           grant_ref:item.step_id==='after-action'||reconcileRecovery?null:recoveryRemoteReceipt.applied_receipt.grant_ref}));
           assert.deepEqual(start.steps,expectedSteps);
-          assert.equal(start.steps[0].decision,'execute_new');
+          assert.equal(start.steps[0].decision,reconcileRecovery?'retain_success':'execute_new');
           assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_start').pluck().get(),1);
-          if(delayRecovery){
+          if(delayRecovery||reconcileRecovery){
            const read=()=>runs.getExecution(null,operation.new_execution_id);
            const poll=async predicate=>{
             const expires=performance.now()+6000;
@@ -1530,38 +1537,88 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            };
            const waitStep=value=>value.dispatch.steps[1];
            const afterWait=value=>value.dispatch.steps[2];
-           await poll(value=>value.dispatch.steps[0].submission?.state==='accepted');
-           assert.equal(waitStep(read()).delay_window,null);
-           returnRecoveryTerminal=true;
-           const window=waitStep(await poll(value=>waitStep(value).delay_window)).delay_window;
-           const due=BigInt(window.body.due_tick_ns),end=BigInt(window.body.deadline_tick_ns);
-           assert.equal(due,BigInt(start.observed_at.tick_ns)+20000000n);
-           assert.equal(end,due+100000000n);
-           assert.deepEqual(window.body.dependencies.terminals,[{step_id:'first',terminal_digest:digest(read().dispatch.steps[0].submission.terminal)}]);
-           tick=due-1n;
-           await wait(35);
-           assert.equal(recoveryCommandCalls,1);
-           assert.equal(waitStep(read()).delay_elapsed,null);
-           tick=lateRecoveryDelay?end:due;
-           const result=await poll(value=>lateRecoveryDelay?value.protection==='delay_window_expired':afterWait(value).submission?.state==='accepted');
-           assert.deepEqual(waitStep(result).delay_window,window);
-           if(lateRecoveryDelay){
+           if(settlementRollback)db.exec('CREATE TEMP TRIGGER omit_recovery_execution_release BEFORE DELETE ON automation_execution_head BEGIN SELECT RAISE(IGNORE); END');
+           if(delayRecovery){
+            await poll(value=>value.dispatch.steps[0].submission?.state==='accepted');
+            assert.equal(waitStep(read()).delay_window,null);
+            returnRecoveryTerminal=true;
+            const window=waitStep(await poll(value=>waitStep(value).delay_window)).delay_window;
+            const due=BigInt(window.body.due_tick_ns),end=BigInt(window.body.deadline_tick_ns);
+            assert.equal(due,BigInt(start.observed_at.tick_ns)+20000000n);
+            assert.equal(end,due+100000000n);
+            assert.deepEqual(window.body.dependencies.terminals,[{step_id:'first',terminal_digest:digest(read().dispatch.steps[0].submission.terminal)}]);
+            tick=due-1n;
+            await wait(35);
             assert.equal(recoveryCommandCalls,1);
-            assert.equal(waitStep(result).delay_elapsed,null);
-            assert.equal(afterWait(result).submission,null);
-            assert.equal(runs.get(null,run.run_id).lifecycle,'paused');
-           }else{
-            assert.equal(recoveryCommandCalls,2);
-            assert.equal(waitStep(result).delay_elapsed.body.clock.tick_ns,String(due));
-            assert.deepEqual(afterWaitEvidence.parameters.body.delay_window_refs,[window.ref]);
-            assert.ok(BigInt(afterWaitEvidence.eligible_before_ns)<epoch+(end-due));
+            assert.equal(waitStep(read()).delay_elapsed,null);
+            tick=lateRecoveryDelay?end:due;
+            const result=await poll(value=>lateRecoveryDelay?value.protection==='delay_window_expired':afterWait(value).submission?.state==='accepted');
+            assert.deepEqual(waitStep(result).delay_window,window);
+            if(lateRecoveryDelay){
+             assert.equal(recoveryCommandCalls,1);
+             assert.equal(waitStep(result).delay_elapsed,null);
+             assert.equal(afterWait(result).submission,null);
+             assert.equal(runs.get(null,run.run_id).lifecycle,'paused');
+            }else{
+             assert.equal(recoveryCommandCalls,2);
+             assert.equal(waitStep(result).delay_elapsed.body.clock.tick_ns,String(due));
+             assert.deepEqual(afterWaitEvidence.parameters.body.delay_window_refs,[window.ref]);
+             assert.ok(BigInt(afterWaitEvidence.eligible_before_ns)<epoch+(end-due));
+             assert.deepEqual(await startExecution(),starts[0]);
+             assert.equal(recoveryCommandCalls,2);
+            }
+           }
+           if(settling)returnFollowUpTerminal=true;
+           const result=settling?await poll(value=>value.completion||value.protection==='recovery_dispatch_unavailable'):read();
+           if(settling){
+            const done=runs.get(null,run.run_id);
+            const slot=runs.getActivationSlot(null,draft.definition_id);
+            assert.equal(slot.active_run_id,run.run_id);
+            assert.equal(slot.revision,operation.committed_slot_revision);
+            assert.equal(done.lifecycle,'paused');
+            assert.equal(done.dispatch_eligible,false);
+            assert.equal(recoveryCommandCalls,reconcileRecovery?0:2);
+            const lock=db.prepare('SELECT released_by FROM automation_recovery_lock WHERE operation_id=?').pluck().get(operation.operation_id);
+            if(settlementRollback){
+             assert.equal(result.completion,null);
+             assert.equal(result.reconciliation_required,true);
+             assert.equal(done.revision,'9');
+             assert.deepEqual(done.business_state,{state_id:'idle',revision:'1'});
+             assert.equal(done.active_execution_id,operation.new_execution_id);
+             assert.equal(slot.active_operation_id,operation.operation_id);
+             assert.equal(lock,null);
+             assert.ok(afterWait(result).submission.terminal);
+             assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_execution_commit').pluck().get(),0);
+            }else{
+             const {body,digest:commitDigest,notification}=result.completion;
+             assert.equal(result.protection,null);
+             assert.equal(result.reconciliation_required,false);
+             assert.equal(done.revision,'10');
+             assert.deepEqual(done.business_state,{state_id:'live',revision:'2'});
+             assert.equal(done.active_execution_id,null);
+             assert.equal(done.active_operation_id,null);
+             assert.equal(done.last_execution_id,operation.new_execution_id);
+             assert.equal(slot.active_operation_id,null);
+             assert.equal(lock,commitDigest);
+             assert.equal(notification.event_id,operation.new_execution_id+'.completed');
+             assert.deepEqual(runs.getRecoveryOperation(null,run.run_id,operation.operation_id).completion,result.completion);
+             const historical=runs.getExecution(null,executionId);
+             assert.equal(historical.reconciliation_required,false);
+             assert.deepEqual(historical.recovery_completion_ref,{...body.execution_ref,kind:'execution_commit',revision:'1',digest:commitDigest});
+             assert.equal(body.steps.length,start.steps.length);
+             assert.deepEqual(body.steps.map(step=>step.decision),start.steps.map(step=>step.decision));
+             assert.equal(db.prepare('SELECT count(*) FROM automation_execution_head WHERE execution_id=?').pluck().get(executionId),0);
+             assert.throws(()=>db.exec('DELETE FROM automation_recovery_execution_commit'),/immutable_recovery_execution_commit/);
+            }
             assert.deepEqual(await startExecution(),starts[0]);
-            assert.equal(recoveryCommandCalls,2);
+            assert.deepEqual(read().completion,result.completion);
+            assert.equal(recoveryCommandCalls,reconcileRecovery?0:2);
            }
            const restarted=new Database(filename);
            try{
             const after=automationRunStore({...assembly,db:restarted,bootId:id(),isOpen:()=>restarted.open});
             assert.deepEqual(after.getExecution(null,operation.new_execution_id).dispatch,result.dispatch);
+            assert.deepEqual(after.getExecution(null,operation.new_execution_id).completion,result.completion);
             assert.equal(after.get(null,run.run_id).lifecycle,'paused');
            }finally{restarted.close();}
            assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
