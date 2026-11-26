@@ -62,7 +62,7 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
  assert.ok(accepted,'Controller did not durably accept the scheduled command');
  const {admission}=occurrence;
  assert.deepEqual(admission.activation_ref,activation.ref);
- let terminal=null;
+ let terminal=null,resource=null;
  if(dispatch){
   const deadline=performance.now()+20000;
   let settled,failed;
@@ -110,6 +110,14 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
    await delay(200);
   }while(performance.now()<adoptionDeadline);
   assert.ok(terminal,'Scheduled execution did not consume the Controller terminal receipt');
+  const resources=await seamer('nativeAutomationCommandResource',{identity:await refresh(),execution_id:admission.execution_id,
+   step_id:admission.first_step_id});
+  assert.deepEqual(resources.adjudication.command_ref,accepted.reference);
+  assert.deepEqual(resources.terminal,terminal);
+  resource=resources.resource;
+  assert.equal(resource?.status,'released');
+  assert.ok(resource.hold_ref&&resource.resource_commit_ref);
+  assert.deepEqual(resource.resource_evidence_refs,terminal.state.resource_evidence_refs);
   const finished=await seamer('getRun',{identity:await refresh(),run_id:armed.run_id});
   if(withdrawReference){
    assert.equal(finished.lifecycle,'paused');
@@ -126,7 +134,7 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
  const step=execution.steps[0];
  assert.deepEqual(step.prepared_parameters.body.parameters,{value:12});
  assert.equal(step.plan.step_id,admission.first_step_id);
- frames.push({event:'native-scheduled-target-admission',reference:accepted.reference,grant_ref:grantRef,admission,terminal,
+ frames.push({event:'native-scheduled-target-admission',reference:accepted.reference,grant_ref:grantRef,admission,terminal,resource,
   receiver_reference:'native'});
 }
 export async function verifyNativeEventRead({frames,core,config,materials}){

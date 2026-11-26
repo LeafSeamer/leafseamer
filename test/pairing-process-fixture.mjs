@@ -310,6 +310,11 @@ async function execute(command,value){
  if(command==='readPublishedEventProgram')return app.publications.getProgram(identityHandles.get(value.identity),value.definition_id,value.version);
  if(command==='nativeTriggerExecution'&&seamerInitial.executionSource)
   return app.runs.getExecution(identityHandles.get(value.identity),value.execution_id);
+ if(command==='nativeAutomationCommandResource'&&seamerInitial.executionSource){
+  const execution=app.runs.getExecution(identityHandles.get(value.identity),value.execution_id);
+  const {pairing_ref,request}=execution.steps.find(({plan})=>plan.step_id===value.step_id).submission.body;
+  return app.pairing.transport.readAutomationCommandResource(pairing_ref.id,request);
+ }
  if(command==='approveBindings')return app.bindingApprovals.approve(identityHandles.get(value.identity),bindingHandles.get(value.handle),value.request);
  if(command==='bindingCandidate')return app.bindingApprovals.candidate(identityHandles.get(value.identity),value.definition_id,value.query);
  if(command==='approveCurrentBindings')return app.bindingApprovals.approveCurrent(identityHandles.get(value.identity),value.query,value.request,value.context??null);
