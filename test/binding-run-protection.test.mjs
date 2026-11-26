@@ -396,13 +396,14 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
  ['人员恢复预览固定当前命令核销并保留历史未知终态','40',null,'validated','terminal_reconciled'],
  ['人员恢复原子消费预览并一次性记录新执行开始','44',null,'validated','recovery_reserved'],
+ ['人员恢复执行提供真实配对动作并按原命令查回丢失响应','45',null,'validated','recovery_dispatch'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
 ])test('布防受理、回执采用和最终提交保留同一操作：'+label,async t=>{
  const registration=eventRegistration(),hasTarget=schema_revision!=='16',executionPlanning=Number(schema_revision)>=25;
  const withTerminals=Number(schema_revision)>=30;
- const recoveryReserved=commandCase==='recovery_reserved';
+ const dispatchRecovery=commandCase==='recovery_dispatch',recoveryReserved=dispatchRecovery||commandCase==='recovery_reserved';
  const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5MissingRelease=commandCase==='r5_missing_release';
  const r5Optional=commandCase==='r5_optional'||r5MissingRelease;
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
@@ -486,6 +487,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   let observeProtectionReply=null,resourceReply=null,readRecoveryApproval=null;
   let recoverySubmission=null,recoveryLookupCalls=0,recoveryRemoteReceipt=null,recoveryPeerFailure=null;
   let approvalEndorsementForRecovery=null;
+  let recoveryCommand=null,recoveryAdjudication=null,recoveryCommandSocket=null,recoveryCommandCalls=0,recoveryCommandReads=0;
   let recoveryGrantCurrent=true,recoveryGrantReads=0,loseRecoveryQualification=false;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
@@ -635,6 +637,33 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    const queriedSockets=new WeakSet();
    const commands=commandCase?{
     async submit(_binding,socket,request){
+     if(request.action.execution_ref.revision==='2'){
+      try{
+       assert.equal(dispatchRecovery,true);
+       assert.equal(++recoveryCommandCalls,1);
+       recoveryCommand=request;
+       recoveryCommandSocket=socket;
+       assert.equal(runs.get(null,recoverySubmission.run_id).lifecycle,'running');
+       const row=db.prepare(`SELECT s.body_jcs FROM automation_recovery_dispatch_submission s JOIN automation_recovery_dispatch_submission_attempt a
+        USING(execution_id,step_id) WHERE s.execution_id=? AND s.step_id=?`).pluck().get(request.action.execution_ref.object_id,request.action.step_id);
+       assert.deepEqual(JSON.parse(row).request,request);
+       const published=await observeActionBinding(request.action);
+       assert.equal(published.original.execution.origin_kind,'recovery');
+       assert.equal(published.original.recovery.source_parameters.body.parameters.value,true);
+       if(controllerActions){
+        const normalized=controllerActions.actionAdmissionRequest(request.action,target);
+        const adopted=controllerActions.actionAdmissionBinding(published.original,normalized,recoveryRemoteReceipt,bp.binding_id);
+        assert.deepEqual(adopted.target,action);
+        assert.deepEqual(adopted.parameters,{value:true});
+       }
+       const body={contract_version:'command-admission/0.1.0-draft.1',revision:'1',adjudication_id:id(),decision:'accepted',
+        identity:automationCommandIdentity(request,recoveryRemoteReceipt.applied_receipt.grant.principal),
+        command_ref:ref('command',target,id(),digest('queued recovery action')),commit_ref:ref('controller_commit',target,id(),digest('recovery action adjudication'))};
+       recoveryAdjudication={...body,adjudication_digest:digest(body)};
+       socket.destroy();
+       return {created:true,adjudication:recoveryAdjudication};
+      }catch(error){recoveryPeerFailure=error;throw error;}
+     }
      assert.ok(++commandSubmits<=(scheduledRuntime?2:1));
      assert.equal(db.inTransaction,false);
      inspect(f.dir,other=>{
@@ -667,6 +696,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      }
      return {created:true,adjudication:submittedAdjudication};
     },lookup(_binding,socket,request){
+     if(request.action.execution_ref.revision==='2'){
+      assert.deepEqual(request,recoveryCommand);
+      if(socket!==recoveryCommandSocket&&!queriedSockets.has(socket)){queriedSockets.add(socket);recoveryCommandReads++;}
+      return recoveryAdjudication?{state:'found',adjudication:recoveryAdjudication}:{state:'not_found',adjudication:null};
+     }
      assert.deepEqual(request,sentCommand);
      if(socket===submittingSocket)return {state:'found',adjudication:submittedAdjudication};
      if(!queriedSockets.has(socket)){queriedSockets.add(socket);commandLookups++;}
@@ -1094,7 +1128,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(await readResult(),{adjudication:savedAdjudication,terminal:null});
           const activeDependency=commandCase==='terminal_dependency'||r5;
           const afterProtection=commandCase==='terminal_after_protection';
-          const suppliedSuccess=!['terminal_unknown','terminal_reconciled','recovery_reserved'].includes(commandCase)&&!r5Optional,command_ref=savedAdjudication.command_ref;
+          const suppliedSuccess=!['terminal_unknown','terminal_reconciled'].includes(commandCase)&&!recoveryReserved&&!r5Optional,command_ref=savedAdjudication.command_ref;
           const evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
           const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',
            outcome:suppliedSuccess?'succeeded':r5Optional?'failed':recoveryReserved?'blocked':'unknown',effect_status:suppliedSuccess?'verified':r5Optional||recoveryReserved?'not_sent':'possible',
@@ -1445,6 +1479,34 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(start.steps,expectedSteps);
           assert.equal(start.steps[0].decision,'execute_new');
           assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_start').pluck().get(),1);
+          if(dispatchRecovery){
+           const expires=performance.now()+6000;
+           while(performance.now()<expires&&!recoveryPeerFailure){
+            if(runs.getExecution(null,operation.new_execution_id).dispatch.steps[0].submission?.adjudication)break;
+            await wait(10);
+           }
+           assert.ifError(recoveryPeerFailure);
+           const recovered=runs.getExecution(null,operation.new_execution_id);
+           assert.equal(recovered.protection,'execution_runtime_unavailable');
+           assert.deepEqual(runs.get(null,run.run_id),{...updated,revision:'9'});
+           assert.equal(recovered.dispatch.execution_ref.revision,'2');
+           assert.deepEqual(recovered.dispatch.steps[0].submission?.adjudication,recoveryAdjudication);
+           assert.equal(recoveryAdjudication?.decision,'accepted');
+           assert.equal(recoveryCommandCalls,1);
+           assert.equal(recoveryCommandReads,1);
+           assert.deepEqual(await startExecution(),starts[0]);
+           assert.equal(recoveryCommandCalls,1);
+           const resumed=new Database(filename);
+           try{
+            const after=automationRunStore({...assembly,db:resumed,bootId:id(),isOpen:()=>resumed.open});
+            assert.deepEqual(after.getExecution(null,operation.new_execution_id),recovered);
+            assert.equal(after.get(null,run.run_id).lifecycle,'paused');
+           }finally{resumed.close();}
+           assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
+           assert.equal(commandSubmits,1);
+           assert.deepEqual(db.pragma('foreign_key_check'),[]);
+           return;
+          }
           assert.deepEqual(runs.get(null,run.run_id),{...updated,revision:'9'});
           const newExecution=runs.getExecution(null,operation.new_execution_id);
           assert.deepEqual(newExecution.start,starts[0].body.result);

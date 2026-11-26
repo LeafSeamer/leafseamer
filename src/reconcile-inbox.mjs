@@ -602,6 +602,17 @@ export function reconcileInbox({db,service,bootId,clock,isOpen,referenceProvider
  }
  return Object.freeze({
   sourceEvent,ageEvidenceForPublisher,receiveCursor,...(withAgeRevisions&&{prepareAge}),
+  readDispatchOriginInTransaction(cursor){
+   available();
+   need(db.inTransaction&&same(cursor.scope,scope),'execution_action_origin');
+   const row=db.prepare('SELECT apply_id,cursor FROM subscription_reconcile_inbox WHERE ingest_epoch=? AND receive_sequence=?')
+    .raw().get(cursor.ingest_epoch,Number(cursor.receive_sequence));
+   const stored=row&&entryAt(...row);
+   need(stored?.entry.entry_kind==='source.event'&&stored.observation.delivery_mode==='live','execution_action_origin');
+   const {origin,origin_digest}=stored.entry.payload;
+   need(digest(origin)===origin_digest,'execution_action_origin');
+   return {origin,origin_digest};
+  },
   confirmed(receipt,cursor,hash){return confirmedEntry(receipt,cursor,hash);},
   ready(receipt,cursor,hash,generation){
    return confirmedEntry(receipt,cursor,hash)&&hasCheckpoint(receipt,generation,cursor);

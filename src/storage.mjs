@@ -108,8 +108,10 @@ const migration43Sql=fs.readFileSync(new URL('./storage-v43.sql',import.meta.url
 const migration43Digest='sha256:'+crypto.createHash('sha256').update(migration43Sql).digest('hex');
 const migration44Sql=fs.readFileSync(new URL('./storage-v44.sql',import.meta.url),'utf8');
 const migration44Digest='sha256:'+crypto.createHash('sha256').update(migration44Sql).digest('hex');
-const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql,migration34Sql,migration35Sql,migration36Sql,migration37Sql,migration38Sql,migration39Sql,migration40Sql,migration41Sql,migration42Sql,migration43Sql,migration44Sql];
-const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest,migration34Digest,migration35Digest,migration36Digest,migration37Digest,migration38Digest,migration39Digest,migration40Digest,migration41Digest,migration42Digest,migration43Digest,migration44Digest];
+const migration45Sql=fs.readFileSync(new URL('./storage-v45.sql',import.meta.url),'utf8');
+const migration45Digest='sha256:'+crypto.createHash('sha256').update(migration45Sql).digest('hex');
+const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql,migration34Sql,migration35Sql,migration36Sql,migration37Sql,migration38Sql,migration39Sql,migration40Sql,migration41Sql,migration42Sql,migration43Sql,migration44Sql,migration45Sql];
+const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest,migration34Digest,migration35Digest,migration36Digest,migration37Digest,migration38Digest,migration39Digest,migration40Digest,migration41Digest,migration42Digest,migration43Digest,migration44Digest,migration45Digest];
 const applicationId=0x4c53534d;
 const engine={version:'3.53.4',source:'2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'};
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -207,6 +209,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
  let db;try{
   db=open(filename(directory));const value=validate(db),bootId=crypto.randomUUID();let closed=false,pairings=null,bindingApprovals=null,snapshotIngest=null,sourceTransportReader=null,serviceApprovalReader=null,runEndorsementReader=null,readRevokedEndorsement=null,sendProtection=null,observeProtection=null,preparationTransport=null,commandTransport=null,boundAuthority=draftAuthority;
   let recoveryPreparationTransport=null;
+  let reconcile=null;
   if(expectedIdentity!==null)need(value.service_id===expectedIdentity.service_id&&value.database_instance_id===expectedIdentity.database_instance_id,'protected_ingress_identity');
   const authority={authorizeInTransaction(input){need(boundAuthority,'draft_authority_unavailable');return boundAuthority.authorizeInTransaction(input);},
    commitRequestInTransaction(input){boundAuthority?.commitRequestInTransaction?.(input);},
@@ -314,6 +317,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
     sendRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport,'run_preparation_transport_unavailable');return recoveryPreparationTransport.submit(...args);},
     lookupRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport,'run_preparation_transport_unavailable');return recoveryPreparationTransport.lookup(...args);},
     observeRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport?.eligibility,'run_preparation_transport_unavailable');return recoveryPreparationTransport.eligibility(...args);},
+    readRecoveryDispatchOrigin(cursor){need(!closed&&reconcile,'execution_action_origin');return reconcile.readDispatchOriginInTransaction(cursor);},
     submitAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.submit(...args);},
     lookupAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.lookup(...args);},
     readAutomationCommandResult(...args){need(!closed&&commandTransport?.result,'execution_command_terminal_transport_unavailable');return commandTransport.result(...args);},
@@ -350,7 +354,11 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
    },
    bindBindingApprovals({receiver,eventReceiver=null}){need(!closed&&boundAuthority&&pairings,'binding_approval_dependencies');bindingApprovals=bindingApprovalStore({db,service:value,isOpen:()=>!closed,authority:boundAuthority,receiver,eventReceiver,pairings});return bindingApprovals;},
    bindSnapshotIngest({receiver}){need(!closed&&pairings&&Number(value.schema_revision)>=4,'snapshot_ingest_dependencies');snapshotIngest=snapshotIngestStore({db,service:value,bootId,isOpen:()=>!closed,receiver});return snapshotIngest;},
-   bindReconcileInbox({clock,referenceProvider=null}){need(!closed&&pairings&&Number(value.schema_revision)>=5,'reconcile_inbox_dependencies');return reconcileInbox({db,service:value,bootId,isOpen:()=>!closed,clock,referenceProvider,triggerDecisions:storage.runs.triggerDecisions});},
+   bindReconcileInbox({clock,referenceProvider=null}){
+    need(!closed&&pairings&&Number(value.schema_revision)>=5,'reconcile_inbox_dependencies');
+    reconcile=reconcileInbox({db,service:value,bootId,isOpen:()=>!closed,clock,referenceProvider,triggerDecisions:storage.runs.triggerDecisions});
+    return reconcile;
+   },
    bindSourceTransport(reader){need(!closed&&snapshotIngest&&Number(value.schema_revision)>=5&&!sourceTransportReader&&typeof reader==='function','run_source_dependencies');sourceTransportReader=reader;},
    bindExecutionNotifications(consumerId){
     need(!closed&&Number(value.schema_revision)>=33,'execution_notification_schema');

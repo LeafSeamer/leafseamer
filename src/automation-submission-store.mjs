@@ -9,26 +9,27 @@ const submissionFollowupBytes=2048+8192+256;
 const submissionOriginals=4;
 const terminalBudgetBytes=8192;
 
-export function automationSubmissionStore(db,{withTerminals=false}={}){
- const select=db.prepare(`SELECT s.step_id,s.body_jcs,s.body_digest,a.body_jcs,a.body_digest,
+export function automationSubmissionStore(db,{withTerminals=false,recovery=false}={}){
+ const prepare=sql=>db.prepare(recovery?sql.replaceAll('automation_execution_','automation_recovery_dispatch_'):sql);
+ const select=prepare(`SELECT s.step_id,s.body_jcs,s.body_digest,a.body_jcs,a.body_digest,
   u.step_id IS NOT NULL,d.body_jcs,d.body_digest${withTerminals?',t.body_jcs,t.body_digest':''} FROM automation_execution_submission s
   LEFT JOIN automation_execution_submission_attempt a USING(execution_id,step_id)
   LEFT JOIN automation_execution_submission_uncertain u USING(execution_id,step_id)
   LEFT JOIN automation_execution_submission_adjudication d USING(execution_id,step_id)
   ${withTerminals?'LEFT JOIN automation_execution_command_terminal t USING(execution_id,step_id)':''} WHERE s.execution_id=?`).raw();
- const usage=db.prepare(`SELECT count(*) AS count,coalesce(sum(length(CAST(body_jcs AS BLOB))),0) AS bytes,
+ const usage=prepare(`SELECT count(*) AS count,coalesce(sum(length(CAST(body_jcs AS BLOB))),0) AS bytes,
   coalesce(sum(json_extract(body_jcs,'$.format')='leafseamer.action-submission/2'),0)
   FROM automation_execution_submission WHERE execution_id=?`).raw();
- const insert=db.prepare('INSERT INTO automation_execution_submission VALUES(?,?,?,?,?)');
- const insertAttempt=db.prepare('INSERT INTO automation_execution_submission_attempt VALUES(?,?,?,?,?,?,?,?,?)');
- const insertUncertain=db.prepare('INSERT INTO automation_execution_submission_uncertain VALUES(?,?) ON CONFLICT DO NOTHING');
- const readUncertain=db.prepare('SELECT 1 FROM automation_execution_submission_uncertain WHERE execution_id=? AND step_id=?').pluck();
- const insertAdjudication=db.prepare('INSERT INTO automation_execution_submission_adjudication VALUES(?,?,?,?)');
- const pending=db.prepare(`SELECT a.execution_id,a.step_id FROM automation_execution_submission_attempt a
+ const insert=prepare('INSERT INTO automation_execution_submission VALUES(?,?,?,?,?)');
+ const insertAttempt=prepare('INSERT INTO automation_execution_submission_attempt VALUES(?,?,?,?,?,?,?,?,?)');
+ const insertUncertain=prepare('INSERT INTO automation_execution_submission_uncertain VALUES(?,?) ON CONFLICT DO NOTHING');
+ const readUncertain=prepare('SELECT 1 FROM automation_execution_submission_uncertain WHERE execution_id=? AND step_id=?').pluck();
+ const insertAdjudication=prepare('INSERT INTO automation_execution_submission_adjudication VALUES(?,?,?,?)');
+ const pending=prepare(`SELECT a.execution_id,a.step_id FROM automation_execution_submission_attempt a
   LEFT JOIN automation_execution_submission_adjudication d USING(execution_id,step_id)
   WHERE d.execution_id IS NULL AND (a.execution_id,a.step_id)>(?,?) ORDER BY a.execution_id,a.step_id LIMIT 16`).raw();
- const putTerminal=withTerminals&&db.prepare('INSERT INTO automation_execution_command_terminal VALUES(?,?,?,?)');
- const pendingTerminal=withTerminals&&db.prepare(`SELECT d.execution_id,d.step_id FROM automation_execution_submission_adjudication d
+ const putTerminal=withTerminals&&prepare('INSERT INTO automation_execution_command_terminal VALUES(?,?,?,?)');
+ const pendingTerminal=withTerminals&&prepare(`SELECT d.execution_id,d.step_id FROM automation_execution_submission_adjudication d
   LEFT JOIN automation_execution_command_terminal t USING(execution_id,step_id)
   WHERE t.execution_id IS NULL AND json_extract(d.body_jcs,'$.decision')='accepted' AND (d.execution_id,d.step_id)>(?,?)
   ORDER BY d.execution_id,d.step_id LIMIT 16`).raw();
