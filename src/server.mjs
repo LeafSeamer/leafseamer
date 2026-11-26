@@ -212,7 +212,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   }
   if(storage.runs?.submitArmPreparation)storage.bindArmPreparationTransport({submit:peerTransport.submitRunPreparation,lookup:peerTransport.lookupRunPreparation,
    eligibility:peerTransport.prepareRunPreparationEligibility});
-  if(storage.runs?.prepareRecovery)storage.bindRecoveryPreparationTransport({submit:peerTransport.submitRecoveryPreparation,lookup:peerTransport.lookupRecoveryPreparation});
+  if(storage.runs?.prepareRecovery)storage.bindRecoveryPreparationTransport({submit:peerTransport.submitRecoveryPreparation,lookup:peerTransport.lookupRecoveryPreparation,
+   eligibility:peerTransport.prepareRecoveryPreparationEligibility});
   if(storage.runs?.reconcileAutomationSubmission&&peerTransport.submitAutomationCommand){
    storage.bindAutomationCommandTransport({submit:peerTransport.submitAutomationCommand,lookup:peerTransport.lookupAutomationCommand,
     result:peerTransport.readAutomationCommandResult,resource:peerTransport.readAutomationCommandResource});

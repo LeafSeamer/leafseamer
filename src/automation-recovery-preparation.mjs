@@ -3,7 +3,7 @@ import {armPlanOriginal} from './runtime/peer-run-arm-plan.mjs';
 import {armPreparationRecord,preparationResponseLimit} from './runtime/peer-run-preparation.mjs';
 import {need} from './automation-publication.mjs';
 
-export function automationRecoveryPreparationStore(db){
+export function automationRecoveryPreparationStore(db,{withBinding=false}={}){
  const written=result=>need(result.changes===1,'run_recovery_preparation_storage');
  const registration=db.prepare('SELECT context_id,body_jcs,body_digest FROM automation_recovery_preparation WHERE operation_id=?').raw();
  const targets=db.prepare('SELECT preparation_id,controller_service_id,controller_database_instance_id FROM automation_recovery_preparation_target WHERE operation_id=?').raw();
@@ -11,6 +11,7 @@ export function automationRecoveryPreparationStore(db){
  const receipt=db.prepare('SELECT body_jcs,body_digest FROM automation_recovery_preparation_receipt WHERE preparation_id=?').raw();
  const capacity=table=>db.prepare(`SELECT count(*),coalesce(sum(length(CAST(body_jcs AS BLOB))),0) FROM ${table}`).raw();
  const preparationsSize=capacity('automation_recovery_preparation'),receiptsSize=capacity('automation_recovery_preparation_receipt');
+ const bindingsSize=withBinding?capacity('automation_recovery_execution_binding'):null;
  function decode(text,hash){
   const body=JSON.parse(text);
   need(canonical(body)===text&&digest(body)===hash,'run_recovery_preparation_integrity');
@@ -56,7 +57,35 @@ export function automationRecoveryPreparationStore(db){
   need(same(original.pairing_ref,plan.pairing_ref)&&['submit','lookup'].includes(original.via),'run_recovery_preparation_integrity');
   return {original,...describe(plan,original.record)};
  }
+ function grants(body){
+  need(db.inTransaction&&body.plans.length>0,'run_recovery_transaction');
+  return body.plans.map(plan=>{
+   const evidence=received(plan);
+   need(evidence,'run_preparation_receipts_incomplete');
+   return {lookup:lookup(plan),receipt_ref:evidence.receipt_ref,grant_ref:evidence.grant_ref,pairing_ref:plan.pairing_ref,
+    endorsement_ref:plan.endorsement_ref};
+  });
+ }
+ function binding(original,body=read(original)){
+  const row=db.prepare('SELECT context_id,body_jcs,body_digest FROM automation_recovery_execution_binding WHERE operation_id=?')
+   .raw().get(original.operation.operation_id);
+  if(!row)return null;
+  const [contextId,text,hash]=row,value=decode(text,hash),{operation,operation_ref,execution_ref}=original;
+  need(body&&value.format==='leafseamer.recovery-execution-binding/1'&&value.context_id===contextId&&
+   same(value.operation_ref,operation_ref)&&same(value.execution_ref,execution_ref)&&same(value.approval_ref,body.approval_ref)&&
+   value.run_revision===body.run_revision&&value.arm_generation===operation.recovery_generation&&value.dispatch_eligible===false&&
+   value.registration_digest===digest(body)&&value.plan_digest===operation.plan_digest&&same(value.grants,grants(body)),
+   'run_recovery_preparation_integrity');
+  return {binding_ref:{kind:'recovery_execution_binding',scope:operation.scope,object_id:operation.new_execution_id,revision:'1',digest:hash},binding:value};
+ }
  return Object.freeze({read,lookup,received,
+  ...(withBinding&&{grants,binding,bind(original,body,value){
+   need(db.inTransaction,'run_recovery_transaction');
+   const text=canonical(value);insertSize(bindingsSize,text);
+   written(db.prepare('INSERT INTO automation_recovery_execution_binding VALUES(?,?,?,?)')
+    .run(original.operation.operation_id,value.context_id,text,digest(value)));
+   return binding(original,body);
+  }}),
   operationForPreparation:id=>db.prepare('SELECT operation_id FROM automation_recovery_preparation_target WHERE preparation_id=?').pluck().get(id),
   register(original,body){
    need(db.inTransaction,'run_recovery_transaction');

@@ -395,7 +395,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
  ['人员恢复预览固定当前命令核销并保留历史未知终态','40',null,'validated','terminal_reconciled'],
- ['人员恢复原子消费预览并查回下一代准备原件','42',null,'validated','recovery_reserved'],
+ ['人员恢复原子消费预览并固定已核验的全部准备','43',null,'validated','recovery_reserved'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
@@ -459,8 +459,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   let sourceChanged=false,transportChanged=false,expireOnCompletionWrite=false,executionGrantDenied=false,expireOnPlanWrite=false,resumeAllowed=true;
   let pendingSource=null;
   const domain={clock_domain_id:id()};
+  let expireOnRecoveryBinding=false;
   const wallTime=()=>({tick:expireOnCompletionWrite&&db.prepare('SELECT 1 FROM automation_arm_completion').pluck().get()?tick+2000000000n:tick,
-   domain,validBeforeTick,acquisition_ref:proof,lower:epoch,upper:expireOnPlanWrite&&db.prepare('SELECT 1 FROM automation_execution_seal').pluck().get()?epoch+250000000n:epoch});
+   domain,validBeforeTick,acquisition_ref:proof,lower:epoch,upper:(
+    expireOnPlanWrite&&db.prepare('SELECT 1 FROM automation_execution_seal').pluck().get()||
+    expireOnRecoveryBinding&&db.prepare('SELECT 1 FROM automation_recovery_execution_binding').pluck().get())?epoch+250000000n:epoch});
   const proof={id:id(),revision:'1',digest:digest('reviewed test profile')};
   pairing.expires_ns=String(epoch+3600000000000n);pairing.transcript_digest=digest(pairing.transcript);
   authEvidence.grant_ref=proof;
@@ -483,6 +486,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   let observeProtectionReply=null,resourceReply=null,readRecoveryApproval=null;
   let recoverySubmission=null,recoveryLookupCalls=0,recoveryRemoteReceipt=null,recoveryPeerFailure=null;
   let approvalEndorsementForRecovery=null;
+  let recoveryGrantCurrent=true,recoveryGrantReads=0,loseRecoveryQualification=false;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
@@ -506,6 +510,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    observeArmPreparation(...args){return seamerTransport.prepareRunPreparationEligibility(...args);},
    sendRecoveryPreparation(...args){return seamerTransport.submitRecoveryPreparation(...args);},
    lookupRecoveryPreparation(...args){return seamerTransport.lookupRecoveryPreparation(...args);},
+   observeRecoveryPreparation(...args){return seamerTransport.prepareRecoveryPreparationEligibility(...args);},
    submitAutomationCommand(...args){return seamerTransport.submitAutomationCommand(...args);},
    lookupAutomationCommand(...args){return seamerTransport.lookupAutomationCommand(...args);},
    readAutomationCommandResult(...args){return seamerTransport.readAutomationCommandResult(...args);},
@@ -717,7 +722,17 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     if(indeterminate)return {state:'indeterminate',record:null};
     if(reportMissing)return {state:'not_found',record:null};
     return remoteReceipt?{state:'found',record:lookupOverride??remoteReceipt}:{state:'not_found',record:null};
-   },prepareEligibility(_binding,_socket,request){
+   },prepareEligibility(_binding,socket,request,{recovery}){
+    if(recovery){
+     recoveryGrantReads++;
+     const applied=recoveryRemoteReceipt.applied_receipt;
+     assert.deepEqual(request,{lookup:{controller_scope:target,origin_scope:scope,preparation_id:recoverySubmission.preparation_id,
+      request_digest:digest(recoverySubmission)},grant_ref:applied.grant_ref,receipt_ref:ref('preparation_receipt',target,applied.receipt_id,digest(applied))});
+     if(!recoveryGrantCurrent)throw Error('fixture recovery grant withdrawn');
+     const body={request,state:'eligible',eligible_before_ns:String(epoch+250000000n)};
+     if(loseRecoveryQualification)socket.destroy();
+     return {body,beforeSend:()=>body};
+    }
     const receipt=remoteReceipt.applied_receipt;
     const {schedule_device_ids,...grantRequest}=request;
     assert.deepEqual(grantRequest,{lookup:intent.lookup,grant_ref:receipt.grant_ref,receipt_ref:ref('preparation_receipt',target,receipt.receipt_id,digest(receipt))});
@@ -1310,6 +1325,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           const selection={run_id:run.run_id,operation_id:operation.operation_id};
           const prepare=()=>httpsRead({...selection,context_id:contextId},'prepare-recovery');
           const observe=()=>httpsRead(selection,'inspect-recovery-preparation');
+          const bind=()=>httpsRead({...selection,context_id:contextId},'bind-recovery-execution');
+          const readBinding=()=>httpsRead(selection,'get-recovery-execution-binding');
+          assert.deepEqual(await readBinding(),{status:200,body:{result:null}});
           assert.equal((await observe()).body.result.state,'unregistered');
           assert.deepEqual(await prepare(),{status:403,body:{error:'PERMISSION_DENIED'}});
           resumeAllowed=true;
@@ -1321,6 +1339,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.equal(pending.status,200,JSON.stringify({pending,failures}));
           assert.ifError(recoveryPeerFailure);
           assert.equal(pending.body.result.state,'pending');
+          assert.deepEqual(await bind(),{status:409,body:{error:'PREPARATION_PENDING'}});
+          assert.equal(recoveryGrantReads,0);
           assert.equal(pending.body.result.targets[0].state,'awaiting_receipt');
           assert.deepEqual(recoverySubmission.operation_ref,accepted.body.result.operation_ref);
           assert.equal(recoverySubmission.execution_id,operation.new_execution_id);
@@ -1343,6 +1363,53 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.equal(recoveryLookupCalls,1);
           assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_preparation_attempt').pluck().get(),1);
           assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_preparation_receipt').pluck().get(),1);
+          resumeAllowed=false;
+          assert.deepEqual(await bind(),{status:403,body:{error:'PERMISSION_DENIED'}});
+          resumeAllowed=true;
+          recoveryGrantCurrent=false;
+          assert.deepEqual(await bind(),{status:409,body:{error:'PREFLIGHT_INELIGIBLE'}});
+          recoveryGrantCurrent=true;
+          loseRecoveryQualification=true;
+          assert.deepEqual(await bind(),{status:409,body:{error:'PREFLIGHT_INELIGIBLE'}});
+          loseRecoveryQualification=false;
+          observeProtectionReply=report('unconfirmed');
+          assert.deepEqual(await bind(),{status:409,body:{error:'REVISION_CONFLICT'}});
+          observeProtectionReply=report('verified');
+          const savedResourceReply=resourceReply;
+          resourceReply=()=>({adjudication:savedAdjudication,terminal:null,resource:null});
+          assert.deepEqual(await bind(),{status:409,body:{error:'REVISION_CONFLICT'}});
+          resourceReply=savedResourceReply;
+          transportChanged=true;
+          assert.deepEqual(await bind(),{status:409,body:{error:'REVISION_CONFLICT'}});
+          transportChanged=false;
+          expireOnRecoveryBinding=true;
+          assert.deepEqual(await bind(),{status:409,body:{error:'PREFLIGHT_EXPIRED'}});
+          expireOnRecoveryBinding=false;
+          assert.deepEqual(await readBinding(),{status:200,body:{result:null}});
+          const bindings=await Promise.all([bind(),bind()]);
+          const bindingReply=bindings[0];
+          assert.equal(bindingReply.status,200,JSON.stringify({bindingReply,failures}));
+          assert.deepEqual(bindings[1],bindingReply);
+          const {binding_ref,binding}=bindingReply.body.result;
+          assert.equal(binding_ref.object_id,operation.new_execution_id);
+          assert.equal(binding_ref.digest,digest(binding));
+          assert.deepEqual(binding.operation_ref,accepted.body.result.operation_ref);
+          assert.deepEqual(binding.execution_ref,receipt.body.result.execution_ref);
+          assert.equal(binding.dispatch_eligible,false);
+          assert.equal(binding.arm_generation,'4');
+          assert.deepEqual(binding.approval_ref,newRef);
+          assert.equal(binding.eligible_before_ns,String(epoch+250000000n));
+          assert.deepEqual(binding.grants.map(({grant_ref})=>grant_ref),[recoveryRemoteReceipt.applied_receipt.grant_ref]);
+          recoveryGrantCurrent=false;
+          const grantReads=recoveryGrantReads;
+          assert.deepEqual(await bind(),bindingReply);
+          assert.equal(recoveryGrantReads,grantReads);
+          const reopened=new Database(filename);
+          try{
+           const after=automationRunStore({...assembly,db:reopened,bootId:id(),isOpen:()=>reopened.open});
+           assert.deepEqual(after.getRecoveryExecutionBinding(null,run.run_id,operation.operation_id),bindingReply.body.result);
+           assert.equal(after.get(null,run.run_id).dispatch_eligible,false);
+          }finally{reopened.close();}
           assert.deepEqual(runs.get(null,run.run_id),updated);
           assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
           assert.equal(db.prepare('SELECT count(*) FROM automation_arm_preparation_receipt').pluck().get(),1);

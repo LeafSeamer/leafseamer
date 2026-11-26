@@ -43,6 +43,8 @@ const runApprovalRequests=new Map([
  ['lookup-recovery-operation',['run_id','context_id','idempotency_key']],
  ['prepare-recovery',['run_id','operation_id','context_id']],
  ['inspect-recovery-preparation',['run_id','operation_id']],
+ ['bind-recovery-execution',['run_id','operation_id','context_id']],
+ ['get-recovery-execution-binding',['run_id','operation_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -55,6 +57,7 @@ const revocationOperations=new Set(['create-revocation-context','revoke','lookup
 const recoveryPreviewOperations=new Set(['preview-recovery','get-recovery-preview','revalidate-recovery-preview']);
 const recoveryOperations=new Set(['create-resume-context','resume','get-recovery-operation','lookup-recovery-operation']);
 const preparationOperations=new Set(['prepare-recovery','inspect-recovery-preparation']);
+const executionBindingOperations=new Set(['bind-recovery-execution','get-recovery-execution-binding']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -103,6 +106,7 @@ function failure(error){
  if(code==='run_recovery_preview_capacity')return [429,'CAPACITY_EXCEEDED'];
  if(code==='run_arm_preflight_ineligible'||code==='run_recovery_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
+ if(code==='run_recovery_preparation_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(['run_arm_request','run_preflight_reference'].includes(code))return [422,'INVALID_REQUEST'];
  if(code==='run_arm_completion_authorization')return [403,'PERMISSION_DENIED'];
  if(code==='run_preflight_capacity')return [429,'CAPACITY_EXCEEDED'];
@@ -183,6 +187,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'lookup-recovery-operation':return runs.lookupRecoveryOperation(handle,request.run_id,request);
    case 'prepare-recovery':return runs.prepareRecovery(handle,request.run_id,request.operation_id,request.context_id);
    case 'inspect-recovery-preparation':return runs.getRecoveryPreparation(handle,request.run_id,request.operation_id);
+   case 'bind-recovery-execution':return runs.bindRecoveryExecution(handle,request.run_id,request.operation_id,request.context_id);
+   case 'get-recovery-execution-binding':return runs.getRecoveryExecutionBinding(handle,request.run_id,request.operation_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -255,7 +261,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     body.operation==='preflight-recovery'&&!runs.preflightRecovery||
     recoveryPreviewOperations.has(body.operation)&&!runs.previewRecovery||
     recoveryOperations.has(body.operation)&&!runs.resumeRun||
-    preparationOperations.has(body.operation)&&!runs.prepareRecovery)){empty(res,404);return;}
+    preparationOperations.has(body.operation)&&!runs.prepareRecovery||
+    executionBindingOperations.has(body.operation)&&!runs.bindRecoveryExecution)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

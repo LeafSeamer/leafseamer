@@ -35,7 +35,7 @@ const utc=value=>{
  return BigInt(millis)*1000000n;
 };
 
-export function automationRunStore({db,service,bootId,isOpen,authority,publications,schedules=null,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,observeApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,sendRecoveryPreparation,lookupRecoveryPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult,readAutomationCommandResource}){
+export function automationRunStore({db,service,bootId,isOpen,authority,publications,schedules=null,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,observeApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,sendRecoveryPreparation,lookupRecoveryPreparation,observeRecoveryPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult,readAutomationCommandResource}){
  const scope=Object.freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});
  const writer=work=>{
   need(isOpen()&&db.open&&!db.inTransaction&&Number(service.schema_revision)>=5,'run_unavailable');
@@ -154,7 +154,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const executionCommits=withRunCommit?automationExecutionCommit(db):null;
  const recoveryPreviews=Number(service.schema_revision)>=40?automationRecoveryPreviewStore({db,scope,bootId,requestEpoch:service.request_epoch}):null;
  const recoveries=Number(service.schema_revision)>=41?automationRecoveryOperationStore({db,scope,previews:recoveryPreviews}):null;
- const recoveryPreparations=Number(service.schema_revision)>=42?automationRecoveryPreparationStore(db):null;
+ const recoveryPreparations=Number(service.schema_revision)>=42?
+  automationRecoveryPreparationStore(db,{withBinding:Number(service.schema_revision)>=43}):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
  const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules,withScheduledRuntime}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
@@ -1299,17 +1300,21 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {body:structuredClone(captured.body),beforeSend};
   }finally{pendingPlans--;}
  }
- function recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources=false,previewRevision=null){
+ function recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources=false,previewRevision=null,reservation=null){
   const original=proposalRun(runId),proof=authorize(authentication,'getRun',original.definition_id,null);
   need(proof.actor.principal_kind==='human','local_authorization_human');
   const run=currentRun(original);
-  need(run.lifecycle==='paused'&&run.active_execution_id===executionId,'run_recovery_execution_conflict');
+  need(run.lifecycle==='paused'&&run.active_execution_id===(reservation?.operation.new_execution_id??executionId),'run_recovery_execution_conflict');
   const value=executions.read(executionId),registered=arm.forRun(run);
-  need(value&&registered&&value.execution.run_id===runId&&value.execution.arm_generation===run.arm_generation&&
+  const sourceGeneration=reservation?value?.execution.arm_generation:run.arm_generation;
+  if(reservation)need(same(reservation.operation_ref,recoveries.active(runId)?.operation_ref)&&
+   same(value?.execution_ref,reservation.operation.source_execution_ref)&&run.active_operation_id===reservation.operation.operation_id&&
+   run.arm_generation===reservation.operation.recovery_generation,'run_recovery_execution_conflict');
+  need(value&&registered&&value.execution.run_id===runId&&value.execution.arm_generation===sourceGeneration&&
    value.execution.activation_slot.active_operation_id===registered.operation.operation_id&&!executionCommits.read(executionId),
    'run_recovery_execution_conflict');
   const approval_ref=registered.operation.approval_ref;
-  const protection=approvals.recoveryProtectionInTransaction(run,approval_ref,run.arm_generation);
+  const protection=approvals.recoveryProtectionInTransaction(run,approval_ref,sourceGeneration);
   let previewBasis;
   if(previewRevision!==null){
    need(run.revision===previewRevision,'run_recovery_execution_conflict');
@@ -1341,7 +1346,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
      resource_evidence_refs:terminal.state.resource_evidence_refs}:null}];
   });
   need(same(proof,authorize(authentication,'getRun',run.definition_id,null)),'run_authorization_changed');
-  return {proof,evidence:{run_id:runId,run_revision:run.revision,execution_ref:value.execution_ref,arm_generation:run.arm_generation,
+  return {proof,evidence:{run_id:runId,run_revision:reservation?.operation.previous_run_revision??run.revision,execution_ref:value.execution_ref,arm_generation:sourceGeneration,
    pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps},...(includeResources&&{commands}),
    ...(previewBasis&&{previewBasis,execution:value.execution,executionSteps:value.steps})};
  }
@@ -1357,10 +1362,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   if(adjudication.decision==='rejected')return {...step,state:'rejected',adjudication_ref:adjudication.commit_ref};
   return resource?{...step,state:resource.status,resource}:{...step,state:'unconfirmed'};
  }
- async function observeRecoveryProtection(authentication,runId,executionId,{includeResources=false,previewRevision=null,finish=null}={}){
+ async function observeRecoveryProtection(authentication,runId,executionId,{includeResources=false,previewRevision=null,finish=null,reservation=null}={}){
   checked('LifecycleId',runId);checked('LifecycleId',executionId);
   function capture(){
-   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources,previewRevision),protection=snapshot.evidence.observed_protection;
+   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources,previewRevision,reservation),protection=snapshot.evidence.observed_protection;
    const requests=protection?.targets.map(({target_scope})=>approvals.prepareRecoveryProtectionInTransaction(protection.operation_ref,target_scope))??[];
    return {...snapshot,requests};
   }
@@ -1689,6 +1694,87 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   if(!isPlan)return body;
   return {body,beforeSend(){const current=writer(read);need(same(body,current),'run_recovery_preparation_changed');return current;}};
  }
+ let pendingRecoveryBindings=0;
+ async function bindRecoveryExecution(authentication,runId,operationId,contextId){
+  for(const id of [runId,operationId,contextId])checked('LifecycleId',id);
+  function capture(){
+   const reader=visibleRecovery(authentication,runId),original=reservedRecovery(runId,operationId);
+   need(same(reader.actor,original.operation.initiator),'local_authorization_human');
+   const registration=recoveryPreparations.read(original),existing=recoveryPreparations.binding(original,registration);
+   if(existing)return {existing};
+   need(registration,'run_preparation_receipts_incomplete');
+   const {run,approval}=recoveryPreparationState(original);
+   need(run.revision===registration.run_revision&&same(approval.approval_ref,registration.approval_ref),'run_recovery_preparation_changed');
+   const proof=authorize(authentication,resumeOperation,run.definition_id,contextId);
+   need(same(proof.actor,reader.actor)&&proof.authentication_evidence?.credential,'local_authorization_human');
+   const grants=recoveryPreparations.grants(registration);
+   const pairs=registration.plans.map(armPlanPair);
+   return {original,registration,run,approval,proof,grants,pairs};
+  }
+  need(pendingRecoveryBindings<4,'run_preparation_plan_capacity');
+  const {captured,start}=writer(()=>({captured:capture(),start:authority.runApprovalTimeInTransaction()}));
+  if(captured.existing)return captured.existing;
+  pendingRecoveryBindings++;
+  try{
+   const requests=captured.grants.map(({lookup,receipt_ref,grant_ref})=>({lookup,receipt_ref,grant_ref}));
+   const targets=requests.map((request,index)=>({request,pair:captured.pairs[index]}));
+   const observations=await inBatches(targets,async({request,pair})=>{
+    try{return await observeRecoveryPreparation(pair.binding_id,structuredClone(request));}
+    catch{need(false,'run_recovery_preparation_ineligible');}
+   });
+   return await observeRecoveryProtection(authentication,runId,captured.original.operation.source_execution_ref.object_id,{
+    includeResources:true,previewRevision:captured.run.revision,reservation:captured.original,
+    finish(snapshot,plan){
+     const current=capture();
+     if(current.existing)return current.existing;
+     need(same(current,captured)&&digest(snapshot)===current.original.operation.baseline_snapshot_digest&&
+      digest(plan)===current.original.operation.plan_digest,'run_recovery_preparation_changed');
+     function verify(){
+      const proposal=captured.approval.saved.proposal,authentication=captured.proof.authentication_evidence;
+      let deadline=[proposalWindowEnd(proposal),BigInt(authentication.credential.recent_before_ns),start.lower+recoveryPreparationWindowNs,
+       authority.assertArmInitiatorInTransaction(captured.original.operation.initiator,captured.run.definition_id,authentication.grant_ref,'run.resume')]
+       .map(BigInt).reduce((a,b)=>a<b?a:b);
+      const qualifications=observations.map(({original,assertCurrentInTransaction},index)=>{
+       need(original.state==='eligible'&&same(original.request,requests[index])&&assertCurrentInTransaction()===true,
+        'run_recovery_preparation_ineligible');
+       const expires=BigInt(captured.pairs[index].expires_ns),limit=BigInt(original.eligible_before_ns);
+       need(limit<=expires,'run_recovery_preparation_ineligible');
+       if(limit<deadline)deadline=limit;
+       return original;
+      });
+      const now=authority.runApprovalTimeInTransaction();
+      need(same(now.domain,start.domain)&&now.tick>=start.tick&&now.tick<start.tick+recoveryPreparationWindowNs&&
+       now.tick<start.validBeforeTick&&now.upper<deadline,'run_recovery_preparation_expired');
+      return {qualifications,deadline,now};
+     }
+     const {original,registration,run,approval,proof,grants}=current;
+     const {qualifications,deadline,now}=verify();
+     authority.assertRunCapacityInTransaction(proof);
+     const binding={format:'leafseamer.recovery-execution-binding/1',context_id:contextId,operation_ref:original.operation_ref,
+      execution_ref:original.execution_ref,approval_ref:approval.approval_ref,run_revision:run.revision,arm_generation:run.arm_generation,
+      registration_digest:digest(registration),plan_digest:original.operation.plan_digest,grants,qualifications,
+      authorization_digest:proof.authorization_digest,dispatch_eligible:false,service_boot_id:bootId,
+      observed_at:{domain:now.domain,tick_ns:String(now.tick),acquisition_ref:now.acquisition_ref},eligible_before_ns:String(deadline)};
+     const committed=recoveryPreparations.bind(original,registration,binding);
+     const final=verify();
+     const currentAuthority=recoveryPreparationState(original);
+     need(same(final.qualifications,qualifications)&&final.deadline===deadline&&same(currentAuthority,{run,approval})&&
+      same(registration.plans.map(armPlanPair),captured.pairs)&&
+      same(proof,authorize(authentication,resumeOperation,run.definition_id,contextId))&&same(run,currentRun(proposalRun(runId))),
+      'run_recovery_preparation_changed');
+     return committed;
+    }
+   });
+  }catch(error){
+   const prior=writer(()=>{
+    const proof=visibleRecovery(authentication,runId),original=reservedRecovery(runId,operationId);
+    need(same(proof.actor,original.operation.initiator),'local_authorization_human');
+    return recoveryPreparations.binding(original);
+   });
+   if(prior)return prior;
+   throw error;
+  }finally{pendingRecoveryBindings--;}
+ }
  return Object.freeze({
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
    need(db.inTransaction,'execution_schedule_transaction');
@@ -1800,6 +1886,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return writer(()=>{visibleRecovery(authentication,runId);return recoveryPreparationView(reservedRecovery(runId,operationId));});
   },prepareRecoveryPlanForPeer:(bindingId,socket,request)=>recoveryPreparationForPeer(bindingId,socket,request,true),
   readRecoveryInitiatorForPeer:(bindingId,socket,request)=>recoveryPreparationForPeer(bindingId,socket,request,false)}),
+  ...(recoveryPreparations?.binding&&{bindRecoveryExecution,getRecoveryExecutionBinding(authentication,runId,operationId){
+   for(const id of [runId,operationId])checked('LifecycleId',id);
+   return writer(()=>{visibleRecovery(authentication,runId);return recoveryPreparations.binding(reservedRecovery(runId,operationId));});
+  }}),
   ...(recoveries&&{resumeRun,getRecoveryOperation(authentication,runId,operationId){
    checked('LifecycleId',runId);checked('LifecycleId',operationId);
    return writer(()=>{

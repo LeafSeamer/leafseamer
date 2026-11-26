@@ -104,8 +104,10 @@ const migration41Sql=fs.readFileSync(new URL('./storage-v41.sql',import.meta.url
 const migration41Digest='sha256:'+crypto.createHash('sha256').update(migration41Sql).digest('hex');
 const migration42Sql=fs.readFileSync(new URL('./storage-v42.sql',import.meta.url),'utf8');
 const migration42Digest='sha256:'+crypto.createHash('sha256').update(migration42Sql).digest('hex');
-const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql,migration34Sql,migration35Sql,migration36Sql,migration37Sql,migration38Sql,migration39Sql,migration40Sql,migration41Sql,migration42Sql];
-const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest,migration34Digest,migration35Digest,migration36Digest,migration37Digest,migration38Digest,migration39Digest,migration40Digest,migration41Digest,migration42Digest];
+const migration43Sql=fs.readFileSync(new URL('./storage-v43.sql',import.meta.url),'utf8');
+const migration43Digest='sha256:'+crypto.createHash('sha256').update(migration43Sql).digest('hex');
+const migrationScripts=[migrationSql,migration3Sql,migration4Sql,migration5Sql,migration6Sql,migration7Sql,migration8Sql,migration9Sql,migration10Sql,migration11Sql,migration12Sql,migration13Sql,migration14Sql,migration15Sql,migration16Sql,migration17Sql,migration18Sql,migration19Sql,migration20Sql,migration21Sql,migration22Sql,migration23Sql,migration24Sql,migration25Sql,migration26Sql,migration27Sql,migration28Sql,migration29Sql,migration30Sql,migration31Sql,migration32Sql,migration33Sql,migration34Sql,migration35Sql,migration36Sql,migration37Sql,migration38Sql,migration39Sql,migration40Sql,migration41Sql,migration42Sql,migration43Sql];
+const migrationDigests=[digest,migrationDigest,migration3Digest,migration4Digest,migration5Digest,migration6Digest,migration7Digest,migration8Digest,migration9Digest,migration10Digest,migration11Digest,migration12Digest,migration13Digest,migration14Digest,migration15Digest,migration16Digest,migration17Digest,migration18Digest,migration19Digest,migration20Digest,migration21Digest,migration22Digest,migration23Digest,migration24Digest,migration25Digest,migration26Digest,migration27Digest,migration28Digest,migration29Digest,migration30Digest,migration31Digest,migration32Digest,migration33Digest,migration34Digest,migration35Digest,migration36Digest,migration37Digest,migration38Digest,migration39Digest,migration40Digest,migration41Digest,migration42Digest,migration43Digest];
 const applicationId=0x4c53534d;
 const engine={version:'3.53.4',source:'2026-07-24 19:02:57 bf7c7f30031888f4e796e429ab3978879485813aaca6f641c7b33e4e09459bcc'};
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -309,6 +311,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
     observeArmPreparation(...args){need(!closed&&preparationTransport,'run_preparation_transport_unavailable');return preparationTransport.eligibility(...args);},
     sendRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport,'run_preparation_transport_unavailable');return recoveryPreparationTransport.submit(...args);},
     lookupRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport,'run_preparation_transport_unavailable');return recoveryPreparationTransport.lookup(...args);},
+    observeRecoveryPreparation(...args){need(!closed&&recoveryPreparationTransport?.eligibility,'run_preparation_transport_unavailable');return recoveryPreparationTransport.eligibility(...args);},
     submitAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.submit(...args);},
     lookupAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.lookup(...args);},
     readAutomationCommandResult(...args){need(!closed&&commandTransport?.result,'execution_command_terminal_transport_unavailable');return commandTransport.result(...args);},
@@ -329,10 +332,11 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
      [submit,lookup,eligibility].every(method=>typeof method==='function'),'run_preparation_transport_unavailable');
     preparationTransport=Object.freeze({submit,lookup,eligibility});
    },
-   bindRecoveryPreparationTransport({submit,lookup}){
+   bindRecoveryPreparationTransport({submit,lookup,eligibility}){
     need(!closed&&Number(value.schema_revision)>=42&&pairings&&boundAuthority&&!recoveryPreparationTransport&&
-     [submit,lookup].every(method=>typeof method==='function'),'run_preparation_transport_unavailable');
-    recoveryPreparationTransport=Object.freeze({submit,lookup});
+     [submit,lookup].every(method=>typeof method==='function')&&
+     (Number(value.schema_revision)<43||typeof eligibility==='function'),'run_preparation_transport_unavailable');
+    recoveryPreparationTransport=Object.freeze({submit,lookup,eligibility});
    },
    bindAutomationCommandTransport({submit,lookup,result,resource=null}){
     need(!closed&&Number(value.schema_revision)>=29&&pairings&&boundAuthority&&!commandTransport&&

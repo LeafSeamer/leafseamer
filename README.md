@@ -421,6 +421,8 @@ HTTP 202 表示预览已单次消费。Seamer 原子保存恢复操作、新执�
 
 Seamer 先原子登记完整请求，再经配对提交。每个目标固定绑定原拒收代次的 RunGrant、新批准、恢复操作、新代次及新执行。新准备授权以五秒为上限，同时受当前权限、配对及各原授权期限约束。提交尝试只登记一次。回包丢失时，再调用 `prepare-recovery` 按原身份查回已提交的回执。具备当前运行读取权限的人员可用 `inspect-recovery-preparation` 查询 `{run_id, operation_id}` 的状态。 `receipts_observed` 表示全部回执原件已保存。运行和设备保护仍保持，后续启用需要核验当前资格并完成开始事务。
 
+显式迁移至 Schema 43 后，恢复发起人可凭近期认证和有效恢复上下文调用 `bind-recovery-execution`，请求为 `{run_id, operation_id, context_id}`。Seamer 要求完整准备回执，按原身份复核各目标当前 RunGrant 资格，并重新核对旧代保护、命令资源、已发布依赖和来源连续性。任一证据缺失、变化或到期时，运行保持暂停。核验通过后，Seamer 原子保存新执行与全目标实际 RunGrant 的绑定原件。用 `get-recovery-execution-binding` 查询 `{run_id, operation_id}` 可查回原件。绑定是历史证据，恢复开始和实际派发仍需当前资格及写入门控。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
