@@ -478,8 +478,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   const control={control_ref:{id:id(),revision:'1',digest:digest('device control original')},control_epoch:id(),effective_version:'0',
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
+ let recoveryControl=null;
   let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
-  let observeProtectionReply=null,resourceReply=null;
+  let observeProtectionReply=null,resourceReply=null,readRecoveryApproval=null;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
@@ -510,9 +511,10 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    authorizeControllerPeerInTransaction(binding,socket){assert.equal(binding,pairing.binding_id);if(socket)assert.equal(socket.authorized,true);
     return {record:pairing,peer:{service_id:target.authority_service_id,database_instance_id:peerDatabase,service_kind:'controller'}};},
    prepareEndorsement:async(_binding,object_ref)=>({original:{object_ref,endorsement:{authorization_basis_refs:[policy]}},
-    pairing_ref:{id:pairing.binding_id,revision:pairing.revision,digest:pairing.digest},devices:[{device_id:action.device_id,control}],assertCurrentInTransaction(){}}),
+    pairing_ref:{id:pairing.binding_id,revision:pairing.revision,digest:pairing.digest},devices:[{device_id:action.device_id,control:recoveryControl??control}],assertCurrentInTransaction(){}}),
    prepareRunActionObservations:async()=>()=>{},prepareServiceApproval:async(_binding,_principal,approval_ref)=>({pairing_ref:proof,
-    original:{issuer_scope:target??scope,approval_ref,approval:{not_before_ns:'0',expires_ns:String(epoch+86400000000000n),automation_origin:{seamer_scope:scope}}},assertCurrentInTransaction(){}}),
+    original:{issuer_scope:target??scope,approval_ref,subject_ref:proof,approval:{not_before_ns:'0',expires_ns:String(epoch+86400000000000n),
+     device_ids:[action.device_id],automation_origin:{seamer_scope:scope}}},assertCurrentInTransaction(){}}),
    armAdmissionPolicy:{inspectInTransaction(){assert.ok(db.inTransaction);
     if(revokeOnWrite&&db.prepare('SELECT 1 FROM automation_arm_budget').pluck().get())return null;
     return {profile_ref:proof,qualification_ref:proof,capacity:{...counts,rows:limited?'39':'40'},required:counts};}}};
@@ -695,7 +697,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     }else ordinaryObservations++;
     if(!eligible||executionGrantDenied||parameterCase==='grant'&&postCommitTick!==null)throw Error('test target no longer eligible');
     const body={request,state:'eligible',eligible_before_ns:String(epoch+250000000n)};return {body,beforeSend:()=>body};
-   }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runActionBinding(...args){
+   }}}),peer(scope,'seamer',bMaterial,{runArmPlan:runs.prepareArmPlanForPeer,runApproval:runs.readApprovalForPeer,runActionBinding(...args){
     return scheduledActionRead?scheduledActionRead(...args):runs.prepareActionBindingForPeer(...args);
    }})]);
    a.transport.bindPeers([b.describe()]);b.transport.bindPeers([a.describe()]);
@@ -707,6 +709,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    const seamerRecord={...active,binding_id:bp.binding_id,peer_service_id:ap.service_id,digest:pairing.digest};
    Object.assign(pairing,seamerRecord);b.record(seamerRecord);
    seamerTransport=b.transport;
+   readRecoveryApproval=reference=>a.transport.readRunApproval(ap.binding_id,reference);
    if(a.transport.prepareRunActionBinding)observeActionBinding=request=>a.transport.prepareRunActionBinding(ap.binding_id,request);
    const received=await a.transport.prepareRunArmPlan(ap.binding_id,plan);
    assert.deepEqual(received.original,prepared.body.original);assert.equal(received.assertCurrentInTransaction(),true);
@@ -1233,6 +1236,47 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            assert.equal(after.get(null,run.run_id).active_execution_id,operation.new_execution_id);
            assert.equal(after.get(null,run.run_id).lifecycle,'paused');
           }finally{restarted.close();}
+          const beforeApproval=runs.getApprovalRevision(null,saved.operation.approval_ref.object_id,'1');
+          assert.equal(beforeApproval.state,'revoked');
+          const previous=beforeApproval.approval,approval_ref={id:id(),revision:'1',digest:digest('fresh service approval')};
+          const proposal={context:{context_id:contextId,idempotency_key:id()},artifact_ref:previous.artifact_ref,expected_run_revision:paused.revision,
+           service_principal:previous.service_principal,source:{binding_id:pairing.binding_id,approval_ref},validity,
+           controller_constraints:[{controller_scope:target,constraints:[{...action,parameter_pointer:'/value',rule:{kind:'equals',value:true}}]}]};
+          const propose=value=>httpsRead({run_id:run.run_id,proposal:value},'propose');
+          assert.deepEqual(await propose({...proposal,controller_constraints:[]}),{status:409,body:{error:'REVISION_CONFLICT'}},JSON.stringify(failures));
+          assert.deepEqual(await propose({...proposal,service_principal:{...proposal.service_principal,principal_id:id()}}),
+           {status:409,body:{error:'REVISION_CONFLICT'}});
+          const fresh=await propose(proposal);
+          assert.equal(fresh.status,200,JSON.stringify({fresh,failures}));
+          const freshRef=fresh.body.result.proposal_ref;
+          const approvalRequest={context:{context_id:contextId,idempotency_key:id()},expected_run_revision:paused.revision,
+           expected_prior_approval_ref:beforeApproval.object_ref,proposal_ref:freshRef,
+           controller_endorsement_refs:[ref('run_approval_endorsement',target,id(),digest('fresh endorsement'))]};
+          const approve=value=>httpsRead({run_id:run.run_id,approval:value},'approve');
+          assert.deepEqual(await approve({...approvalRequest,proposal_ref:previous.proposal_ref}),{status:409,body:{error:'REVISION_CONFLICT'}},JSON.stringify(failures));
+          assert.deepEqual(await approve({...approvalRequest,controller_endorsement_refs:[]}),{status:422,body:{error:'INVALID_REQUEST'}});
+          recoveryControl={...control,gate_state:'fencing',pending_operation_id:id()};
+          assert.deepEqual(await approve(approvalRequest),{status:409,body:{error:'REVISION_CONFLICT'}});
+          recoveryControl=null;
+          const replacement=await approve(approvalRequest);
+          assert.equal(replacement.status,200,JSON.stringify({replacement,failures}));
+          assert.deepEqual(await approve(approvalRequest),replacement);
+          const newRef=replacement.body.result.approval_ref;
+          const observedApproval=await readRecoveryApproval(newRef);
+          assert.equal(observedApproval.local_eligibility,'eligible');
+          assert.deepEqual(observedApproval.object_ref,newRef);
+          assert.deepEqual(observedApproval.approval.proposal_ref,freshRef);
+          const old=runs.getApprovalRevision(null,beforeApproval.object_ref.object_id,'1');
+          assert.equal(old.state,'revoked');
+          assert.deepEqual(old.replacement_ref,newRef);
+          const updated=runs.get(null,run.run_id);
+          assert.equal(updated.revision,'8');
+          assert.equal(updated.lifecycle,'paused');
+          assert.equal(updated.active_execution_id,paused.active_execution_id);
+          assert.equal(updated.active_operation_id,paused.active_operation_id);
+          assert.equal(updated.dispatch_eligible,false);
+          assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
+          assert.equal(db.prepare('SELECT count(*) FROM automation_arm_preparation_receipt').pluck().get(),1);
           assert.equal(commandSubmits,1);
           assert.deepEqual(db.pragma('foreign_key_check'),[]);
           return;

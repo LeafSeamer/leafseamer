@@ -415,6 +415,8 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 HTTP 202 表示预览已单次消费。Seamer 原子保存恢复操作、新执行身份、完整待准备目标、活动互斥锁、审计和固定事件通知，并推进运行和活动槽修订。新代次高于原代次及各目标的拒绝下界。同一人员以原键提交相同内容时查回原受理回执，异内容或另一键竞争消费时返回 HTTP 409。受理后运行仍暂停，原执行保持可查。新执行须经过逐目标准备和独立开始事务才可进入派发。
 
+恢复受理后，当前人员可使用 `propose` 和 `approve` 创建绑定该恢复操作的新组织运行批准。提案沿用原获准的服务主体、完整 Controller 目标、设备动作及参数限制。批准请求的 `expected_prior_approval_ref` 引用原已撤销批准，并提交属于新提案的全部目标背书。Seamer 逐目标复核当前设备在自动模式保护态且没有待处理控制切换，随后原子替换运行的当前批准。原批准保留撤销状态并可查到替换引用。对应 Controller 可通过原配对接口查回新批准，恢复操作仍处于 `reserved`，须另行逐目标准备。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。

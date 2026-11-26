@@ -91,7 +91,8 @@ function failure(error){
  if(['run_proposal_request','run_approval_request','run_approval_targets','run_approval_revocation_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
   'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict',
-  'run_recovery_execution_conflict','run_recovery_preview_changed','run_recovery_operation_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_recovery_execution_conflict','run_recovery_preview_changed','run_recovery_operation_conflict',
+  'run_recovery_approval_changed','run_recovery_approval_scope','run_recovery_approval_control'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='run_preflight_expired'||code==='run_recovery_protection_expired')return [409,'PREFLIGHT_EXPIRED'];
  if(code==='run_recovery_preview_reference')return [400,'INVALID_REQUEST'];
  if(code==='run_recovery_preview_missing'||code==='run_recovery_operation_missing')return [404,'NOT_FOUND'];

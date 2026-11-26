@@ -12,7 +12,7 @@ const revokeOperation='revokeRunApproval';
 const fields=(value,names)=>value&&Object.keys(value).sort().join(',')===names;
 const write=result=>need(result.changes===1,'run_approval_storage');
 
-export function runApprovalStore({db,scope,requestEpoch,writer,authority,authorize,runOriginal,publicationBasisCurrent,bindingRevocationForRun,getProposal,runForProposal,requestIdentity,prepareServiceApproval,prepareEndorsement,currentPairingInTransaction,authorizeControllerPeerInTransaction,canRevoke,canAdoptProtection,canCompleteProtection,sendApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,protectionTargets}){
+export function runApprovalStore({db,scope,requestEpoch,writer,authority,authorize,runOriginal,publicationBasisCurrent,bindingRevocationForRun,getProposal,runForProposal,requestIdentity,prepareServiceApproval,prepareEndorsement,currentPairingInTransaction,authorizeControllerPeerInTransaction,canRevoke,canAdoptProtection,canCompleteProtection,sendApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,protectionTargets,recoveryApprovalBasis=null}){
  let pendingEndorsementRevocations=0;
  let bindingRevocationCursor='';
  const rejectFromPeer=!!authorizeEndorsementSender;
@@ -33,7 +33,7 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
    audit.context_id===contextId&&audit.request_digest===requestDigest&&result.operation_id===operationId&&result.run_id===runId&&
    result.request_identity===identity&&result.request_digest===requestDigest&&same(result.approval_ref,object_ref)&&same(result.result_ref,object_ref)&&
    same(result.proposal_ref,approval.proposal_ref)&&result.kind==='approve'&&result.state==='applied','run_approval_integrity');
-  return {approval,object_ref,result,status_revision:String(statusRevision),state};
+  return {approval,object_ref,result,status_revision:String(statusRevision),state,audit};
  }
  function visible(authentication,run,read){
   const access=authorize(authentication,'getRun',run.definition_id,null),result=read();
@@ -97,7 +97,7 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
  }
  function verifyCompletion(value,notice,rejection){
   const reply=runApprovalProtectionReply(value,notice,{completion:true}),saved=read(db.prepare(records+' WHERE a.approval_id=?').raw().get(notice.approval_ref.object_id));
-  const run=runOriginal(saved.approval.run_id),proposal=approvalProposal(saved.approval,run).saved.proposal;
+  const run=runOriginal(saved.approval.run_id),proposal=approvalProposal(saved,run).saved.proposal;
   const expected=[...new Set(proposalTarget(proposal,notice.target_scope).device_actions.map(action=>action.device_id))].sort();
   need(reply.protection_state==='applied'&&same(reply.rejection,rejection)&&same(notice.approval_ref,saved.object_ref)&&
    reply.run_id===run.run_id&&same(reply.device_ids,expected),'run_approval_protection_completion');return reply;
@@ -161,7 +161,7 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
      db.prepare('SELECT 1 FROM automation_run_approval_revocation WHERE approval_id=?').pluck().get(approvalId))return;
     const run=currentRun(runOriginal(runId)),binding_revocation=bindingRevocationForRun(run);
     need(binding_revocation,'run_binding_revocation_integrity');
-    approvalProposal(saved.approval,run);
+    approvalProposal(saved,run);
     const requestDigest=digest({scope,operation_id:'applyBindingRevocation',approval_ref:saved.object_ref,binding_revocation});
     commitRevocation(saved,run,{key:requestDigest,requestDigest,contextId:null,audit:{binding_revocation}});
    });}catch(error){failure??=error;}
@@ -220,8 +220,17 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
  }
  function eligibleRun(run,expected,priorRef){
   need(run.revision===expected,'run_approval_revision');
-  need(!head(run.run_id)&&priorRef===null&&['disarmed','paused'].includes(run.lifecycle)&&run.arm_generation==='0'&&
-   run.active_execution_id===null&&run.active_operation_id===null&&run.dispatch_eligible===false,'run_approval_transition');
+  const pointer=head(run.run_id);
+  if(priorRef===null){
+   need(!pointer&&['disarmed','paused'].includes(run.lifecycle)&&run.arm_generation==='0'&&
+    run.active_execution_id===null&&run.active_operation_id===null&&run.dispatch_eligible===false,'run_approval_transition');
+   return null;
+  }
+  const recovery=recoveryApprovalBasis?.(runOriginal(run.run_id));
+  need(recovery&&same(recovery.prior_approval_ref,priorRef)&&pointer?.[0]===priorRef.object_id,'run_recovery_approval_changed');
+  const previous=read(db.prepare(records+' WHERE a.approval_id=?').raw().get(pointer[0]));
+  need(previous.state==='revoked'&&same(previous.object_ref,priorRef),'run_recovery_approval_changed');
+  return recovery;
  }
  function checkWindow(proposal,source){
   const {lower,upper}=authority.runApprovalTimeInTransaction(),before=BigInt(Date.parse(proposal.validity.not_before))*1000000n;
@@ -254,20 +263,20 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
    }
   };
  }
- function approvalProposal(approval,run){
+ function approvalProposal({approval,audit},run){
   const proposed=getProposal(approval.proposal_ref,run),proposal=proposed.saved.proposal;
   need(same(proposal.controller_targets.map(target=>target.controller_scope),approval.controller_endorsement_refs.map(ref=>ref.scope))&&
    same(proposal.source_service_approval_ref,approval.source_service_approval_ref)&&same(proposal.service_principal,approval.service_principal)&&
    same(proposal.validity,approval.validity)&&same(proposal.artifact_ref,approval.artifact_ref)&&
    same(proposal.dependency_footprint_ref,approval.dependency_footprint_ref)&&approval.program_digest===proposal.program_digest&&
-   approval.bindings_digest===proposal.bindings_digest,'run_approval_integrity');
+   approval.bindings_digest===proposal.bindings_digest&&same(proposed.audit.recovery??null,audit.recovery??null),'run_approval_integrity');
   return proposed;
  }
  function originalAuthorityInTransaction(reference,run){
   need(db.inTransaction,'run_approval_transaction');
   const saved=read(db.prepare(records+' WHERE a.approval_id=?').raw().get(reference.object_id));
   need(saved.approval.run_id===run.run_id&&same(saved.object_ref,reference),'run_approval_missing');
-  return {saved:approvalProposal(saved.approval,run).saved,approval_ref:saved.object_ref};
+  return {saved:approvalProposal(saved,run).saved,approval_ref:saved.object_ref};
  }
  function currentAuthorityInTransaction(run){
   const pointer=head(run.run_id);
@@ -275,7 +284,8 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
   const saved=read(db.prepare(records+' WHERE a.approval_id=?').raw().get(pointer[0])),approval=saved.approval;
   need(approval.run_id===run.run_id&&saved.state==='active'&&authority.runApprovalTimeInTransaction().upper<proposalWindowEnd(approval),'run_preflight_approval');
   requireUnrejectedProposal(approval.proposal_ref);
-  const proposed=approvalProposal(approval,run);
+  const proposed=approvalProposal(saved,run);
+  need(!saved.audit.recovery||same(saved.audit.recovery,recoveryApprovalBasis?.(runOriginal(run.run_id))),'run_recovery_approval_changed');
   const targets=approval.controller_endorsement_refs.map(ref=>({bindingId:pairFor(ref.scope).binding_id,ref}));
   return {saved:proposed.saved,sourceBindingId:proposed.audit.source_binding_id,targets,approval_ref:saved.object_ref,status_revision:saved.status_revision};
  }
@@ -288,7 +298,10 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
   }
   const revoked=canRevoke?db.prepare(revocations+' WHERE approval_id=?').raw().get(approval.approval_id):null;
   need((state==='active'&&!revoked)||state==='expired'||(['revoking','revoked'].includes(state)&&revoked),'run_approval_integrity');
-  return {approval,object_ref,state,status_revision,replacement_ref:null,revocation_operation_ref:revoked?readRevocation(revoked,saved).reference:null,
+  const pointer=head(approval.run_id);
+  const replacement=state==='revoked'&&pointer&&pointer[0]!==approval.approval_id?read(db.prepare(records+' WHERE a.approval_id=?').raw().get(pointer[0])):null;
+  const replacement_ref=same(replacement?.audit.recovery?.prior_approval_ref??null,object_ref)?replacement.object_ref:null;
+  return {approval,object_ref,state,status_revision,replacement_ref,revocation_operation_ref:revoked?readRevocation(revoked,saved).reference:null,
    current_eligibility:state==='active'?'unavailable':'blocked',reason_code:state==='active'?null:state};
  }
  function commitRevocation(saved,run,{key,requestDigest,contextId,audit}){
@@ -421,7 +434,8 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
   const {context,proposal_ref,controller_endorsement_refs:refs,expected_run_revision,expected_prior_approval_ref}=structuredClone(request);
   for(const id of Object.values(context))checked('LifecycleId',id);
   checked('LifecycleRevision',expected_run_revision);proposalReference(proposal_ref);
-  if(expected_prior_approval_ref!==null){checked('ContentRef',expected_prior_approval_ref);need(expected_prior_approval_ref.kind==='run_approval','run_approval_request');}
+  if(expected_prior_approval_ref!==null)try{runApprovalReference(expected_prior_approval_ref);}
+  catch{need(false,'run_approval_request');}
   refs.forEach(endorsementReference);
   const byScope=new Map(refs.map(ref=>[canonical(ref.scope),ref]));
   need(byScope.size===refs.length,'run_approval_targets');
@@ -434,22 +448,27 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
    const existing=prior(authentication,run,key,requestDigest);if(existing)return {existing};
    const proof=authorize(authentication,operation,run.definition_id,context.context_id);
    need(same(actor,proof.actor)&&actor.principal_kind==='human','run_approval_authorization');
-   eligibleRun(run,expected_run_revision,expected_prior_approval_ref);
+   const recovery=eligibleRun(run,expected_run_revision,expected_prior_approval_ref);
    requireUnrejectedProposal(proposal_ref);
    need(publicationBasisCurrent(run),'run_publication_binding_unapproved');
    const {saved,audit}=getProposal(proposal_ref,run),proposal=saved.proposal;
+   need(same(audit.recovery??null,recovery),'run_recovery_approval_changed');
    need(proposal.controller_targets.length===byScope.size&&proposal.controller_targets.every(target=>byScope.has(canonical(target.controller_scope))),'run_approval_targets');
    const targets=proposal.controller_targets.map(({controller_scope})=>({bindingId:pairFor(controller_scope).binding_id,ref:byScope.get(canonical(controller_scope))}));
-   return {key,proof,run,saved,targets,sourceBindingId:audit.source_binding_id};
+   return {key,proof,run,saved,targets,sourceBindingId:audit.source_binding_id,recovery};
   });
   if(prepared.existing)return prepared.existing;
   const proposal=prepared.saved.proposal,sourceRef=proposal.source_service_approval_ref;
-  const {assertCurrentInTransaction:verify}=await observeAuthority(prepared);
+  const {controls,assertCurrentInTransaction:verify}=await observeAuthority(prepared,{includeControls:prepared.recovery!==null});
+  if(prepared.recovery)need(same(controls.map(({controller_scope,devices})=>({controller_scope,device_ids:devices?.map(item=>item.device_id)??null})),
+   proposal.controller_targets.map(({controller_scope,device_actions})=>({controller_scope,device_ids:[...new Set(device_actions.map(item=>item.device_id))].sort()})))&&
+   controls.every(({devices})=>devices.every(({control})=>control?.mode==='automatic'&&control.gate_state==='protected'&&control.pending_operation_id===null)),
+   'run_recovery_approval_control');
   return writer(()=>{
    const run=currentRun(runOriginal(runId)),existing=prior(authentication,run,prepared.key,requestDigest);if(existing)return existing;
    const proof=authorize(authentication,operation,run.definition_id,context.context_id);
    need(same(proof,prepared.proof)&&same(run,prepared.run),'run_approval_changed');
-   eligibleRun(run,expected_run_revision,expected_prior_approval_ref);
+   need(same(eligibleRun(run,expected_run_revision,expected_prior_approval_ref),prepared.recovery),'run_recovery_approval_changed');
    requireUnrejectedProposal(proposal_ref);
    need(publicationBasisCurrent(run),'run_publication_binding_unapproved');
    need(same(getProposal(proposal_ref,run).saved,prepared.saved),'run_approval_proposal_changed');
@@ -458,7 +477,8 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
    const id=crypto.randomUUID(),operationId=crypto.randomUUID(),revision=String(BigInt(run.revision)+1n);
    const {principal_kind:_kind,...approved_by}=proof.actor;
    const audit={context_id:context.context_id,request_digest:requestDigest,authentication:proof.authentication_evidence,
-    source_binding_id:prepared.sourceBindingId,targets:prepared.targets,previous_run_revision:run.revision,run_revision:revision};
+    source_binding_id:prepared.sourceBindingId,targets:prepared.targets,previous_run_revision:run.revision,run_revision:revision,
+    ...(prepared.recovery&&{recovery:prepared.recovery,controls})};
    const auditText=canonical(audit),auditHash=digest(audit);
    const approval={scope,approval_id:id,revision:'1',run_id:runId,proposal_ref,artifact_ref:proposal.artifact_ref,program_digest:proposal.program_digest,
     bindings_digest:proposal.bindings_digest,dependency_footprint_ref:proposal.dependency_footprint_ref,service_principal:proposal.service_principal,
@@ -471,7 +491,9 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
     proposal_ref,approval_ref:reference,endorsement_ref:null,state:'applied',targets:[],result_ref:reference,reason_code:null};
    const notice={kind:'run_approval_changed',operation_id:operationId,approval_ref:reference,run_id:runId,run_revision:revision};
    write(db.prepare('INSERT INTO automation_run_approval VALUES(?,?,?,?,?,?,?,?,?,?)').run(id,runId,proposal_ref.object_id,context.context_id,prepared.key,requestDigest,text,hash,auditText,auditHash));
-   write(db.prepare('INSERT INTO automation_run_approval_head VALUES(?,?,?)').run(runId,id,revision));
+   if(prepared.recovery)write(db.prepare('UPDATE automation_run_approval_head SET approval_id=?,run_revision=? WHERE run_id=? AND approval_id=? AND run_revision=?')
+    .run(id,revision,runId,expected_prior_approval_ref.object_id,run.revision));
+   else write(db.prepare('INSERT INTO automation_run_approval_head VALUES(?,?,?)').run(runId,id,revision));
    write(db.prepare("INSERT INTO automation_run_approval_state VALUES(?,1,'active')").run(id));
    write(db.prepare('INSERT INTO automation_run_approval_operation VALUES(?,?,?,?)').run(operationId,id,canonical(result),digest(result)));
    write(db.prepare('INSERT INTO automation_run_approval_outbox VALUES(?,?,?)').run(operationId,canonical(notice),digest(notice)));
@@ -485,11 +507,12 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
    const saved=read(row),approval=saved.approval;
    need(saved.object_ref.revision===request.approval_revision&&approval.controller_endorsement_refs.some(ref=>same(ref.scope,target)),'run_approval_missing');
    const run=runOriginal(approval.run_id);
-   approvalProposal(approval,run);
+   approvalProposal(saved,run);
    const {object_ref,state,status_revision,revocation_operation_ref}=view(saved),{lower,upper}=authority.runApprovalTimeInTransaction();
    const end=proposalWindowEnd(approval),pairEnd=BigInt(paired.record.expires_ns),deadline=end<pairEnd?end:pairEnd;
    const before=BigInt(Date.parse(approval.validity.not_before))*1000000n;
-   const eligible=state==='active'&&head(run.run_id)?.[0]===approval.approval_id&&lower>=before&&upper<deadline&&publicationBasisCurrent(run);
+   const eligible=state==='active'&&head(run.run_id)?.[0]===approval.approval_id&&lower>=before&&upper<deadline&&publicationBasisCurrent(run)&&
+    (!saved.audit.recovery||same(saved.audit.recovery,recoveryApprovalBasis?.(run)));
    need(same(paired,authorizeControllerPeerInTransaction(bindingId,socket)),'run_approval_pairing');
    return {approval,object_ref,state,status_revision,revocation_operation_ref,local_eligibility:eligible?'eligible':'blocked',eligible_before_ns:eligible?String(deadline):null};
   });

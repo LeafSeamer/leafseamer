@@ -125,6 +125,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   runOriginal:proposalRun,publicationBasisCurrent,requestIdentity,prepareServiceApproval,prepareEndorsement,currentPairingInTransaction,authorizeControllerPeerInTransaction,canRevoke:Number(service.schema_revision)>=8,
   canAdoptProtection:Number(service.schema_revision)>=9,canCompleteProtection:Number(service.schema_revision)>=17,
   sendApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,protectionTargets,
+  recoveryApprovalBasis,
   bindingRevocationForRun:publicationBindingRevocationInTransaction?run=>{
    const publication=publications.versionForRunInTransaction(run.definition_id,run.definition_version);
    need(same(publication.result.artifact_ref,run.artifact_ref),'run_dependency_integrity');
@@ -1498,6 +1499,15 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   const run=proposalRun(runId),proof=authorize(authentication,'getRun',run.definition_id,null);
   need(proof.actor.principal_kind==='human','local_authorization_human');return proof;
  }
+ function recoveryApprovalBasis(run){
+  const reserved=recoveries?.active(run.run_id);
+  if(!reserved)return null;
+  const current=currentRun(run),{operation,operation_ref}=reserved;
+  need(current.lifecycle==='paused'&&current.active_operation_id===operation.operation_id&&
+   current.active_execution_id===operation.new_execution_id&&!current.dispatch_eligible,'run_recovery_approval_changed');
+  const {preview}=recoveryPreviews.read(operation.preview_ref);
+  return {operation_ref,prior_approval_ref:preview.snapshot.approval_ref};
+ }
  return Object.freeze({
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
    need(db.inTransaction,'execution_schedule_transaction');
@@ -1824,10 +1834,16 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const publication=publications.versionForRunInTransaction(run.definition_id,run.definition_version);
     need(publicationBasisCurrent(run,publication),'run_publication_binding_unapproved');
     const dependencies=readDependencies(run),plan=deviceTargetPlan(run,dependencies,proof).result;
-    return {run,proof,identity,dependencies,plan,publication};
+    const recovery=recoveryApprovalBasis(proposalRun(runId));
+    const priorApprovalProposal=recovery?approvals.originalAuthorityInTransaction(recovery.prior_approval_ref,run).saved.proposal:null;
+    return {run,proof,identity,dependencies,plan,publication,recovery,priorApprovalProposal};
    });
    if(prepared.prior)return prepared.prior;
    const targets=await constrainRunTargets(controller_constraints,prepared.plan,prepared.publication);
+   if(prepared.priorApprovalProposal){
+    need(same(targets,prepared.priorApprovalProposal.controller_targets)&&same(service_principal,prepared.priorApprovalProposal.service_principal),
+     'run_recovery_approval_scope');
+   }
    const remote=await Promise.allSettled([prepareRunActionObservations(prepared.plan.evidence),prepareServiceApproval(source.binding_id,service_principal,source.approval_ref)]);
    const failed=remote.find(result=>result.status==='rejected');if(failed)throw failed.reason;
    const verifyTargets=remote[0].value,serviceApproval=remote[1].value,approved=serviceApproval.original;
@@ -1836,7 +1852,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     'run_proposal_service_scope');
    return writer(()=>{
     const run=currentRun(proposalRun(runId)),proof=authorize(authentication,proposalOperation,run.definition_id,context.context_id);
-    need(same(proof,prepared.proof)&&same(run,prepared.run),'run_proposal_changed');
+    need(same(proof,prepared.proof)&&same(run,prepared.run)&&same(recoveryApprovalBasis(proposalRun(runId)),prepared.recovery),'run_proposal_changed');
     const prior=priorProposal(prepared.identity,run,requestDigest,authentication);
     if(prior)return prior;
     need(publicationBasisCurrent(run,prepared.publication),'run_publication_binding_unapproved');
@@ -1845,7 +1861,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     checkWindow(before,after,approved);authority.assertRunCapacityInTransaction(proof);
     need(db.prepare('SELECT count(*) FROM automation_run_approval_proposal').pluck().get()<16384,'run_proposal_capacity');
     const id=crypto.randomUUID(),audit={context_id:context.context_id,request_digest:requestDigest,evidence:proof.authentication_evidence,
-     source_subject_ref:approved.subject_ref,source_approval_ref:approved.approval_ref,source_binding_id:source.binding_id};
+     source_subject_ref:approved.subject_ref,source_approval_ref:approved.approval_ref,source_binding_id:source.binding_id,
+     ...(prepared.recovery&&{recovery:prepared.recovery})};
     const auditDigest=digest(audit),body={scope,proposal_id:id,revision:'1',run_id:runId,definition_id:run.definition_id,definition_version:run.definition_version,
      artifact_ref,program_digest:dependencies.body.program_digest,bindings_digest:dependencies.body.bindings_digest,
      dependency_footprint_ref:{kind:'program_dependencies',scope,object_id:run.definition_id,revision:run.definition_version,digest:dependencies.digest},
@@ -1880,6 +1897,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const row=db.prepare(selectProposal+' WHERE proposal_id=?').raw().get(request.proposal_id);
     need(row&&row[5]===request.proposal_digest,'run_proposal_missing');
     const run=proposalRun(row[1]),saved=readProposal(row,run);proposalTarget(saved.proposal,targetScope);
+    const recovery=JSON.parse(row[6]).recovery??null;
+    need(!recovery||same(recovery,recoveryApprovalBasis(run)),'run_recovery_approval_changed');
     need(publicationBasisCurrent(run),'run_publication_binding_unapproved');
     need(authority.runApprovalTimeInTransaction().upper<proposalWindowEnd(saved.proposal),'run_proposal_expired');
     return saved;
