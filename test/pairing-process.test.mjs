@@ -128,7 +128,7 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
    assert.ok([runGui,...Object.values(browser)].every(value=>value&&path.isAbsolute(value)));
    const directory=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-run-browser-'));
    t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
-   const file=path.join(directory,'browser.json'),config=path.join(directory,'site.json'),assets=path.join(directory,'site');
+   const file=path.join(directory,'browser.json'),config=path.join(directory,'site.json'),assets=path.join(directory,'site'),caFile=path.join(directory,'test-ca.pem');
    fs.writeFileSync(config,JSON.stringify({site_label:'运行状态联调',service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,
     seamer:{service_label:'Seamer',service_id:second.identity.service_id,database_instance_id:second.identity.database_instance_id,base_url:second.apiOrigin}}));
    const built=spawnSync(process.execPath,[path.join(runGui,'scripts/build.mjs'),'--config',config,'--out-dir',assets],
@@ -136,9 +136,10 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
    assert.equal(built.status,0,built.stderr);
    await a.call('enableGui',assets);
    const spki=cert=>crypto.createHash('sha256').update(new crypto.X509Certificate(cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
+   fs.writeFileSync(caFile,certificates.ca);
    fs.writeFileSync(file,JSON.stringify({...browser,origin:first.apiOrigin,seamerOrigin:second.apiOrigin,spkis:[spki(ac.cert),spki(bc.cert)],run}));
    const checked=spawnSync(process.execPath,[path.join(runGui,'test/seamer-run-browser-check.mjs'),file],
-    {encoding:'utf8',windowsHide:true,timeout:30000});
+    {encoding:'utf8',windowsHide:true,timeout:60000,env:{...process.env,NODE_EXTRA_CA_CERTS:caFile}});
    assert.equal(checked.status,0,[checked.stderr,checked.stdout,checked.error?.code].join('\n'));
    t.diagnostic(checked.stdout.trim());
    return;
