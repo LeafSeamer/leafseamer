@@ -8,6 +8,7 @@ import {setTimeout as wait} from 'node:timers/promises';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {fork} from 'node:child_process';
 import {once} from 'node:events';
+import {createInterface} from 'node:readline';
 import canonical from 'canonicalize';
 import Database from 'better-sqlite3';
 import {boolean,delay as delayStep,digest,input,reference} from './automation-program-fixture.mjs';
@@ -17,7 +18,7 @@ import {peerCertificates} from '../../leafseamer-controller/test/fixtures/peer-c
 import {triggerReference} from './fixtures/trigger-reference.mjs';
 
 const packageRoot=process.env.LEAFSEAMER_PACKAGE_UNDER_TEST??fileURLToPath(new URL('../',import.meta.url));
-const {migrateStorage}=await import(pathToFileURL(path.join(packageRoot,'dist','storage.mjs')));
+const {migrateStorage,openStorage}=await import(pathToFileURL(path.join(packageRoot,'dist','storage.mjs')));
 const {automationRunStore}=await import(pathToFileURL(path.join(packageRoot,'dist','automation-run-store.mjs')));
 const {scheduleStore}=await import(pathToFileURL(path.join(packageRoot,'dist','schedule-store.mjs')));
 const {startScheduleMonitor}=await import(pathToFileURL(path.join(packageRoot,'dist','schedule-monitor.mjs')));
@@ -389,6 +390,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 规则提交并释放活动执行，下一事件可受理','32',null,'validated','r5_rule'],
  ['排期与事件共享空闲活动槽，受理与版本绑定同事务','38',null,'validated','r5_schedule'],
  ['Schema 39 paired schedule runtime','39',null,'validated','r5_scheduled_runtime'],
+ ['定时执行跨启动域保持保护并保留原活动槽','39',null,'validated','r5_scheduled_restart'],
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
@@ -399,7 +401,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  const withTerminals=Number(schema_revision)>=30;
  const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5Optional=commandCase==='r5_optional';
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
- const scheduledRuntime=commandCase==='r5_scheduled_runtime',scheduleCase=scheduledRuntime||commandCase==='r5_schedule';
+ const scheduledRestart=commandCase==='r5_scheduled_restart';
+ const scheduledRuntime=scheduledRestart||commandCase==='r5_scheduled_runtime',scheduleCase=scheduledRuntime||commandCase==='r5_schedule';
  const stateMachine=['r5_state','r5_notification'].includes(commandCase)||r5Protected;
  const withAnchors=Number(schema_revision)>=26,omitReady=label==='提交后就绪失败保持保护';
  const triggerBinding=inputFor(registration),limits={event_age_limits:[{authority_id:triggerBinding.authority_id,registration_ref:triggerBinding.registration_ref,
@@ -1321,33 +1324,85 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(observedScheduled.binding.step_ready,first.ready);
           assert.deepEqual(observedScheduled.binding.schedule,readSchedule());
           if(controllerActions)assert.deepEqual(observedScheduled.adoption.schedule_binding.window,occurrence.step_windows[0].window);
-          const command_ref=savedAdjudication.command_ref,evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
-          const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',outcome:'succeeded',effect_status:'verified',
-           resource_status:'clear',automation_continuation:'eligible',reason_code:null,terminal_revision:'5',resolution_ref:null,attempt_ids:[id()],
-           completion_evidence_refs:[evidence('decision')],resource_evidence_refs:[evidence('release')]};
-          terminalReply={format:'leafseamer.automation-command-terminal/1',command_ref,state,
-           record_ref:{...command_ref,revision:'5',digest:digest('scheduled terminal')},
-           state_ref:{id:command_ref.object_id+'_state_5',revision:'5',digest:digest(state)},completion_achieved:'effect_verified'};
-          const completeBefore=performance.now()+7000;
-          do{
-           finalExecution=runs.getExecution(null,accepted.execution_ref.object_id);
-           assert.equal(finalExecution.protection,null);
-           if(finalExecution.completion)break;
-           await wait(25);
-          }while(performance.now()<completeBefore);
-          assert.deepEqual(finalExecution.steps[0].submission.terminal,terminalReply);
-          assert.equal(finalExecution.completion?.body.run_revision_after,'8');
-          assert.equal(runs.get(null,run.run_id).active_execution_id,null);
+          if(!scheduledRestart){
+           const command_ref=savedAdjudication.command_ref,evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
+           const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',outcome:'succeeded',effect_status:'verified',
+            resource_status:'clear',automation_continuation:'eligible',reason_code:null,terminal_revision:'5',resolution_ref:null,attempt_ids:[id()],
+            completion_evidence_refs:[evidence('decision')],resource_evidence_refs:[evidence('release')]};
+           terminalReply={format:'leafseamer.automation-command-terminal/1',command_ref,state,
+            record_ref:{...command_ref,revision:'5',digest:digest('scheduled terminal')},
+            state_ref:{id:command_ref.object_id+'_state_5',revision:'5',digest:digest(state)},completion_achieved:'effect_verified'};
+           const completeBefore=performance.now()+7000;
+           do{
+            finalExecution=runs.getExecution(null,accepted.execution_ref.object_id);
+            assert.equal(finalExecution.protection,null);
+            if(finalExecution.completion)break;
+            await wait(25);
+           }while(performance.now()<completeBefore);
+           assert.deepEqual(finalExecution.steps[0].submission.terminal,terminalReply);
+           assert.equal(finalExecution.completion?.body.run_revision_after,'8');
+           assert.equal(runs.get(null,run.run_id).active_execution_id,null);
+          }
           await monitor.close();
-          runs.stopExecutionTimers();
          }
          assert.equal(commandSubmits,scheduledRuntime?2:1);
          assert.deepEqual(db.pragma('foreign_key_check'),[]);
+         runs.stopExecutionTimers();
+         db.close();
+         if(scheduledRestart){
+          const boots=inspect(f.dir,reopened=>{
+           assert.equal(reopened.prepare('SELECT count(*) FROM automation_execution_protection').pluck().get(),0);
+           reopened.exec('CREATE TRIGGER omit_startup_protection BEFORE INSERT ON automation_execution_protection BEGIN SELECT RAISE(IGNORE); END');
+           return reopened.prepare('SELECT count(*) FROM service_boot').pluck().get();
+          });
+          assert.throws(()=>openStorage(f.dir),{code:'boot_execution_protection'});
+          inspect(f.dir,reopened=>{
+           assert.equal(reopened.prepare('SELECT count(*) FROM service_boot').pluck().get(),boots);
+           assert.equal(reopened.prepare('SELECT count(*) FROM automation_execution_protection').pluck().get(),0);
+           reopened.exec('DROP TRIGGER omit_startup_protection');
+          });
+         }
+         let bootId=boot;
+         if(scheduledRestart){
+          const child=fork(path.join(packageRoot,'dist','cli.mjs'),['start','--data-dir',f.dir],{
+           stdio:['ignore','pipe','inherit','ipc'],windowsHide:true,timeout:10000,execArgv:['--disallow-code-generation-from-strings']});
+          const exited=once(child,'close');
+          let ready;
+          try{
+           for await(const line of createInterface({input:child.stdout,crlfDelay:Infinity})){
+            ready=JSON.parse(line);break;
+           }
+           assert.equal(ready?.event,'listening');
+           assert.equal(ready.service_id,scope.authority_service_id);
+           assert.equal(ready.database_instance_id,scope.database_instance_id);
+           assert.notEqual(ready.service_boot_id,bootId);
+           assert.equal((await fetch(`http://127.0.0.1:${ready.port}/health/live`,{signal:AbortSignal.timeout(3000)})).status,200);
+           bootId=ready.service_boot_id;
+          }finally{child.kill();await exited;}
+         }
+         const reopenedStorage=openStorage(f.dir);
+         try{
+          assert.notEqual(reopenedStorage.serviceBootId,bootId);
+          bootId=reopenedStorage.serviceBootId;
+         }finally{reopenedStorage.close();}
          inspect(f.dir,reopened=>{
-          const bootId=id(),schedules=schedulesFor(reopened,bootId);
+          const schedules=schedulesFor(reopened,bootId);
           const historical=automationRunStore({...assembly,db:reopened,bootId,isOpen:()=>reopened.open,schedules});
-          assert.deepEqual(historical.getExecution(null,accepted.execution_ref.object_id),finalExecution);
+          const reason='execution_runtime_unavailable',executionId=accepted.execution_ref.object_id;
+          assert.deepEqual(reopened.prepare('SELECT execution_id,reason FROM automation_execution_protection').raw().all(),
+           scheduledRestart?[[executionId,reason]]:[]);
+          assert.deepEqual(historical.getExecution(null,executionId),scheduledRestart?{...finalExecution,protection:reason}:finalExecution);
           assert.deepEqual(schedules.get(null,scheduleId).occurrences,[occurrenceView]);
+          assert.throws(()=>reopened.transaction(()=>schedules.timeForAdmissionInTransaction({...source,occurrence_id:accepted.admission.occurrence_id},null))
+           .immediate(),{code:'schedule_occurrence_claimed'});
+          const recovered=historical.get(null,run.run_id);
+          const completedSchedule=scheduledRuntime&&!scheduledRestart;
+          assert.equal(recovered.active_execution_id,completedSchedule?null:executionId);
+          if(!completedSchedule){
+           assert.equal(recovered.lifecycle,'paused');
+           assert.ok(recovered.pause_latches.includes(executionId));
+          }
+          assert.deepEqual(reopened.pragma('foreign_key_check'),[]);
          });
          return;
         }

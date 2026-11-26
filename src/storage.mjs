@@ -204,7 +204,22 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
    assertArmInitiatorInTransaction(...args){need(boundAuthority?.assertArmInitiatorInTransaction,'run_authority_unavailable');return boundAuthority.assertArmInitiatorInTransaction(...args);},
    identifyRunApprovalActorInTransaction(input){need(boundAuthority?.identifyRunApprovalActorInTransaction,'run_authority_unavailable');return boundAuthority.identifyRunApprovalActorInTransaction(input);},
    lookupInTransaction(input){need(boundAuthority?.lookupInTransaction,'draft_authority_unavailable');return boundAuthority.lookupInTransaction(input);}};
-  db.transaction(()=>db.prepare("INSERT INTO service_boot VALUES(?,?,?,'started')").run(value.service_id,value.database_instance_id,bootId)).immediate();
+  db.transaction(()=>{
+   need(db.prepare("INSERT INTO service_boot VALUES(?,?,?,'started')").run(value.service_id,value.database_instance_id,bootId).changes===1,'boot_start');
+   if(Number(value.schema_revision)>=38){
+    // 已锚定的旧定时执行保留活动槽及原件，先持久保护，再允许新启动域提供服务。
+    const unprotected=`SELECT e.execution_id
+     FROM automation_execution_head h JOIN automation_execution e USING(execution_id)
+     JOIN automation_execution_anchor USING(execution_id)
+     JOIN schedule_execution_admission a ON a.execution_id=e.execution_id AND a.occurrence_id=e.occurrence_id
+     WHERE json_extract(e.body_jcs,'$.service_boot_id') IS NOT ?
+      AND NOT EXISTS(SELECT 1 FROM automation_execution_protection p WHERE p.execution_id=e.execution_id)
+      AND NOT EXISTS(SELECT 1 FROM automation_execution_commit c WHERE c.execution_id=e.execution_id)`;
+    db.prepare(`INSERT INTO automation_execution_protection(execution_id,reason)
+     SELECT execution_id,'execution_runtime_unavailable' FROM (${unprotected})`).run(bootId);
+    need(!db.prepare(`SELECT 1 FROM (${unprotected}) LIMIT 1`).pluck().get(bootId),'boot_execution_protection');
+   }
+  }).immediate();
   const approvedBindings=publicationPolicy===null?null:draft=>{
    need(bindingApprovals?.preparePublication,'publication_source_unavailable');return bindingApprovals.preparePublication(draft,publicationPolicy);
   };
