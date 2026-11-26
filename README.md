@@ -431,6 +431,8 @@ Seamer 先原子登记完整请求，再经配对提交。每个目标固定绑�
 
 停机并显式迁移至 Schema 47 后，恢复执行在取得全套成功证据后复核原业务状态、当前批准、配对、来源和原截止。同一事务提交目标状态、运行修订、审计和固定完成通知，释放活动执行及恢复锁。原布防批准已撤销，运行保持暂停，定义激活槽继续归属原运行。经人员显式确认的 `reconcile_commit` 使用旧执行的全部成功证据，只提交业务状态。结算原件可从执行查询或 `get-recovery-operation` 查回。结算失败时保留原业务状态、活动执行、恢复锁及已观察的命令终态。
 
+停机执行 `leafseamer migrate-storage --data-dir <数据库绝对目录> --to-revision 48` 后，受信嵌入程序可通过既有 `executionNotificationSink` 接收恢复完成通知。普通执行和恢复执行共用同一消费者和确认格式。请按 `event.event_id` 幂等保存原件并在自己的事务成功后返回 `ack`。确认落库前重启会重送同一通知，已确认的普通与恢复通知在重启时跳过。公共 C05 订阅及浏览器消费按其各自入口验收。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。

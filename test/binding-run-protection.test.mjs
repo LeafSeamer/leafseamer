@@ -38,8 +38,9 @@ const actionControllerRoot=process.env.LEAFSEAMER_ACTION_CONTROLLER_TEST_ROOT;
 const controllerActions=actionControllerRoot?await import(pathToFileURL(path.join(actionControllerRoot,'dist','peer-action-admission.mjs'))):null;
 const ref=(kind,scope,object_id,digest)=>({kind,scope,object_id,revision:'1',digest});
 
-async function verifyNotificationRestart(dir,completion){
+async function verifyNotificationRestart(dir,completion,{recovery=false,upgradeAfterAck=false}={}){
  const consumerId=id(),collector=path.join(dir,'completion-consumer.sqlite');
+ const table=recovery?'automation_recovery_execution':'automation_execution';
  const fixture=fileURLToPath(new URL('./fixtures/execution-notification-consumer.mjs',import.meta.url));
  const children=new Set();
  function start(mode){
@@ -70,7 +71,7 @@ async function verifyNotificationRestart(dir,completion){
   assert.equal(observed.packet.ack.consumer_id,consumerId);
   assert.equal(observed.packet.ack.payload_digest,digest(completion.notification));
   assert.equal(first.child.kill(),true);await first.exited;
-  const receipts=()=>inspect(dir,db=>db.prepare('SELECT body_jcs FROM automation_execution_notification_receipt').pluck().all());
+  const receipts=()=>inspect(dir,db=>db.prepare(`SELECT body_jcs FROM ${table}_notification_receipt`).pluck().all());
   assert.deepEqual(receipts(),[]);
   const recovered=start('recover'),recoveredBoot=await recovered.waitFor(m=>m.event==='running');
   assert.notEqual(firstBoot.boot_id,recoveredBoot.boot_id);
@@ -87,14 +88,18 @@ async function verifyNotificationRestart(dir,completion){
   await recovered.close();
   assert.equal(recovered.messages.filter(m=>m.event==='observed').length,2);
   assert.deepEqual(receipts().map(JSON.parse),[observed.packet.ack]);
+  if(upgradeAfterAck){
+   assert.equal(migrateStorage(dir,'48').schema_revision,'48');
+   assert.deepEqual(receipts().map(JSON.parse),[observed.packet.ack]);
+  }
   const final=start('confirmed');
   await final.waitFor(m=>m.event==='running');await wait(1200);await final.close();
   assert.equal(final.messages.filter(m=>m.event==='observed').length,0);
   const collected=new Database(collector,{readonly:true});
   try{assert.equal(collected.prepare('SELECT count(*) FROM received').pluck().get(),1);}finally{collected.close();}
   inspect(dir,db=>{
-   assert.equal(db.prepare('SELECT count(*) FROM automation_execution_commit').pluck().get(),1);
-   assert.throws(()=>db.exec('DELETE FROM automation_execution_notification_receipt'),/immutable_execution_notification_receipt/);
+   assert.equal(db.prepare(`SELECT count(*) FROM ${table}_commit`).pluck().get(),1);
+   assert.throws(()=>db.exec(`DELETE FROM ${table}_notification_receipt`),{message:'immutable_execution_notification_receipt'});
    assert.deepEqual(db.pragma('foreign_key_check'),[]);
   });
  }finally{
@@ -1622,6 +1627,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
             assert.equal(after.get(null,run.run_id).lifecycle,'paused');
            }finally{restarted.close();}
            assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
+           if(reconcileRecovery){
+            db.close();
+            assert.equal(migrateStorage(f.dir,'48').schema_revision,'48');
+            await verifyNotificationRestart(f.dir,result.completion,{recovery:true});
+           }
            return;
           }
           if(dispatchRecovery){
@@ -2091,7 +2101,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         if(commandCase==='r5_notification'){
          db.close();
          assert.equal(migrateStorage(f.dir,'33').schema_revision,'33');
-         await verifyNotificationRestart(f.dir,originalExecution.completion);
+         await verifyNotificationRestart(f.dir,originalExecution.completion,{upgradeAfterAck:true});
         }
         if(commandCase==='r5_rule'){
          db.close();

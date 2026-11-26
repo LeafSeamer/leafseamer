@@ -476,6 +476,24 @@ test('Schema 47 恢复结算迁移失败时保留 Schema 46 和原件',t=>{
  assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
  inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
 });
+test('Schema 48 恢复完成通知迁移原子增加回执并保留历史',t=>{
+ const {dir,identity}=seeded(t);migrateStorage(dir,'47');
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_recovery_execution_notification_receipt(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'48'),{code:'migration_failed'});
+ inspect(dir,db=>{
+  assert.equal(db.pragma('user_version',{simple:true}),47);
+  db.exec('DROP TABLE automation_recovery_execution_notification_receipt');
+ });
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'48'),{...identity,schema_revision:'48'});
+ const after=allOriginals(dir);
+ for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_recovery_execution_notification_receipt,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
 test('schema1直升4末段失败回滚所有中间版本，schema4摘要篡改拒绝打开',t=>{
  const {dir}=seeded(t);inspect(dir,db=>db.exec('CREATE TABLE snapshot_ingest_seal(sentinel TEXT) STRICT'));const before=allOriginals(dir),meta=originals(dir);
  assert.throws(()=>migrateStorage(dir,'4'),{code:'migration_failed'});assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir),meta);inspect(dir,db=>db.exec('DROP TABLE snapshot_ingest_seal'));migrateStorage(dir,'4');
