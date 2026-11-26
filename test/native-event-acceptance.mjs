@@ -145,6 +145,10 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
    assert.deepEqual(preview.snapshot.current_resources,result.current_resources);
    assert.equal(preview.plan.mode,'blocked');
    assert.equal(preview.plan.items[0].reason,'scheduled_occurrence_not_replayed');
+   const recoveryContext=Buffer.from(canonical({operation:'create-resume-context',request:{ttl_ms:30000,max_unique_requests:1}}));
+   const denied=await requestHttps(origin,ca,{target:'/auth/local-run-approvals/v1',method:'POST',body:recoveryContext,
+    headers:[bearer,['content-type','application/json'],['content-length',String(recoveryContext.length)]]});
+   assert.equal(denied.status,'403',denied.body.toString());
   }else{
    assert.equal(finished.lifecycle,'armed');
    assert.equal(finished.active_execution_id,null);

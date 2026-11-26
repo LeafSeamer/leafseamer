@@ -34,6 +34,26 @@ function fixture(t,{inject=null,managerExpires='18446744073709551615',managerPer
  const draft=c=>({context:{context_id:c.context_id,idempotency_key:id()},content:{program:source().program,selections:[],policy_ref:{kind:'policy',scope:{authority_service_id:service.service_id,database_instance_id:service.database_instance_id},object_id:'policy',revision:'1',digest:digest({})}},metadata:{name:'本地授权测试',description:'',layout:{}}});
  return {dir,service,issuer,principal,editor,actor,editorHandle,handles,handle,request,makeContext,draft,close,open,state,get store(){return store;},get auth(){return authorization;},advance:ns=>f.source.advance(ns)};
 }
+test('恢复上下文要求人员、当前签发方权限、本地授权及近期认证',t=>{
+ const scopes=[...permissions,'run.read','run.resume'];
+ const f=fixture(t,{revision:'41',managerPermissions:scopes,schedule:false});
+ const operator=f.handle(f.principal,scopes);
+ const options={ttl_ms:30000,max_unique_requests:1};
+ assert.throws(()=>f.auth.createResumeRunContext(f.actor,options),{code:'local_authorization_denied'});
+ assert.throws(()=>f.auth.replace(operator,{...f.request,principal_id:id(),principal_kind:'service',permissions:['run.resume']}),
+  {code:'local_authorization_human'});
+ f.auth.replace(operator,{...f.request,permissions:['request.create','request.read','run.read']});
+ assert.throws(()=>f.auth.createResumeRunContext(f.handle(f.editor,scopes),options),{code:'local_authorization_denied'});
+ const stale=f.handle(f.principal,scopes);
+ f.handles.get(stale).recent_authentication.expires_at='2000-01-01T00:00:00.000Z';
+ assert.throws(()=>f.auth.createResumeRunContext(stale,options),{code:'local_authorization_recent'});
+ const context=f.auth.createResumeRunContext(operator,options);
+ f.advance(1000000n);
+ assert.deepEqual(context.operations,['resumeRun']);
+ const input={authentication:operator,operation_id:'resumeRun',definition_id:id(),context_id:context.context_id};
+ assert.equal(f.auth.confirmDraftResult(input).actor.principal_kind,'human');
+ assert.throws(()=>f.auth.confirmDraftResult({...input,authentication:f.handle(f.principal,scopes)}),{code:'local_authorization_context'});
+});
 test('HTTPS 登记与查回未布防运行，固定发布制品及本地接收基线',async t=>{
  const scopes=[...permissions,'definition.publish','run.manage','run.read'];
  let material;

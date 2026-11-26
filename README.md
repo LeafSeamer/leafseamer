@@ -404,6 +404,17 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 预览固定完整 Controller 目标、运行和活动槽修订、制品、接收游标、来源及暂停锁存、逐命令证据和计划。计划标出保留的成功步骤、原动作确未写入的普通触发步骤，以及必须停止的步骤。结果未知时，即使占用已核销，计划仍保留停止项。旧排期场次保持原样。重核要求同一服务启动身份和单调域，截止取最初两秒观察窗口与原认证样本有效期的较早值。预览记录为只读历史证据，保存和重核都保持原执行及活动槽。
 
+停机显式迁移至 Schema 41 后，具备签发方和本地 `run.resume` 权限的人员可用近期认证创建恢复上下文，并在原预览有效期内申请恢复。运行读取权限及定义范围仍在受理时复核。
+
+| 操作 | 请求 |
+| --- | --- |
+| `create-resume-context` | `{ttl_ms, max_unique_requests}` |
+| `resume` | `{run_id, reservation}`，其中 `reservation` 包含 `context`、`expected_revision` 和 `preview_ref` |
+| `get-recovery-operation` | `{run_id, operation_id}` |
+| `lookup-recovery-operation` | `{run_id, context_id, idempotency_key}`，要求当前运行及请求读取权限 |
+
+HTTP 202 表示预览已单次消费。Seamer 原子保存恢复操作、新执行身份、完整待准备目标、活动互斥锁、审计和固定事件通知，并推进运行和活动槽修订。新代次高于原代次及各目标的拒绝下界。同一人员以原键提交相同内容时查回原受理回执，异内容或另一键竞争消费时返回 HTTP 409。受理后运行仍暂停，原执行保持可查。新执行须经过逐目标准备和独立开始事务才可进入派发。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
