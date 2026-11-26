@@ -394,6 +394,16 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 
 `preflight-recovery` 还按每个已尝试动作的原配对和原提交查询 Controller。只有所有动作都有未提交、永久拒收、从未取得占用或已释放的证据，`current_resources.state` 才为 `verified`。只有当前保护和逐命令资源均已核实，且保护回执覆盖全部动作设备，`recovery_evidence_state` 才为 `verified`。两项证据各自显示。查询保留历史终态和原活动槽，人员恢复需另行授权。
 
+停机执行 `leafseamer migrate-storage --data-dir <绝对路径> --to-revision 40` 可启用持久恢复预览。普通启动沿用数据库已有版本。人员通过同一本机 HTTPS 入口提交以下请求。
+
+| 操作 | 请求 |
+| --- | --- |
+| `preview-recovery` | `{run_id, execution_id, expected_revision}`，保存当前暂停执行的证据和计划，返回 `preview_ref` |
+| `get-recovery-preview` | `{run_id, preview_ref}`，凭当前人员及对象权限查回历史原件 |
+| `revalidate-recovery-preview` | `{run_id, preview_ref}`，使用原人员授权在原截止内重读两端证据并验证摘要 |
+
+预览固定完整 Controller 目标、运行和活动槽修订、制品、接收游标、来源及暂停锁存、逐命令证据和计划。计划标出保留的成功步骤、原动作确未写入的普通触发步骤，以及必须停止的步骤。结果未知时，即使占用已核销，计划仍保留停止项。旧排期场次保持原样。重核要求同一服务启动身份和单调域，截止取最初两秒观察窗口与原认证样本有效期的较早值。预览记录为只读历史证据，保存和重核都保持原执行及活动槽。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。

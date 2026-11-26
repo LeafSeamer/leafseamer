@@ -347,6 +347,23 @@ for(const collision of ['service_state_v4','schema_migration_v4','snapshot_inges
  assert.throws(()=>migrateStorage(dir,'4'),{code:'migration_failed'});assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir),meta);
  inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),3);db.exec('DROP TABLE '+collision);});assert.equal(migrateStorage(dir,'4').schema_revision,'4');
 });
+test('Schema 40 显式保存恢复预览，写冲突回滚到完整 Schema 39',t=>{
+ const {dir,identity}=seeded(t);
+ migrateStorage(dir,'39');
+ const previous=openStorage(dir);try{assert.equal(previous.identity.schema_revision,'39');}finally{previous.close();}
+ const before=allOriginals(dir),history=originals(dir).schema_migration;
+ inspect(dir,db=>db.exec('CREATE TABLE automation_recovery_preview(conflict TEXT)'));
+ assert.throws(()=>migrateStorage(dir,'40'),{code:'migration_failed'});
+ inspect(dir,db=>{assert.equal(db.pragma('user_version',{simple:true}),39);db.exec('DROP TABLE automation_recovery_preview');});
+ assert.deepEqual(allOriginals(dir),before);
+ assert.deepEqual(originals(dir).schema_migration,history);
+ assert.deepEqual(migrateStorage(dir,'40'),{...identity,schema_revision:'40'});
+ const after=allOriginals(dir);
+ for(const [name,rows] of Object.entries(before))assert.deepEqual(after[name],rows,name);
+ assert.deepEqual(after.automation_recovery_preview,[]);
+ assert.deepEqual(originals(dir).schema_migration.slice(0,-1),history);
+ inspect(dir,db=>assert.deepEqual(db.pragma('foreign_key_check'),[]));
+});
 test('schema1直升4末段失败回滚所有中间版本，schema4摘要篡改拒绝打开',t=>{
  const {dir}=seeded(t);inspect(dir,db=>db.exec('CREATE TABLE snapshot_ingest_seal(sentinel TEXT) STRICT'));const before=allOriginals(dir),meta=originals(dir);
  assert.throws(()=>migrateStorage(dir,'4'),{code:'migration_failed'});assert.deepEqual(allOriginals(dir),before);assert.deepEqual(originals(dir),meta);inspect(dir,db=>db.exec('DROP TABLE snapshot_ingest_seal'));migrateStorage(dir,'4');

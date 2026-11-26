@@ -134,6 +134,17 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
    assert.equal(result.current_resources.steps[0].state,'released');
    assert.deepEqual(result.current_resources.steps[0].resource,resource);
    assert.equal(result.steps[0].terminal.outcome,'blocked');
+   const previewRequest=Buffer.from(canonical({operation:'preview-recovery',request:{run_id:armed.run_id,
+    execution_id:admission.execution_id,expected_revision:finished.revision}}));
+   const saved=await requestHttps(origin,ca,{target:'/auth/local-run-approvals/v1',method:'POST',body:previewRequest,
+    headers:[bearer,['content-type','application/json'],['content-length',String(previewRequest.length)]]});
+   assert.equal(saved.status,'200',saved.body.toString());
+   const {preview_ref,preview}=JSON.parse(saved.body).result;
+   assert.equal(preview_ref.digest,digest(preview));
+   assert.equal(preview.snapshot.execution_ref.object_id,admission.execution_id);
+   assert.deepEqual(preview.snapshot.current_resources,result.current_resources);
+   assert.equal(preview.plan.mode,'blocked');
+   assert.equal(preview.plan.items[0].reason,'scheduled_occurrence_not_replayed');
   }else{
    assert.equal(finished.lifecycle,'armed');
    assert.equal(finished.active_execution_id,null);

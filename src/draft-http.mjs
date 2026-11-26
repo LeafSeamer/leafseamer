@@ -34,6 +34,9 @@ const runApprovalRequests=new Map([
  ['inspect-recovery-evidence',['run_id','execution_id']],
  ['observe-recovery-protection',['run_id','execution_id']],
  ['preflight-recovery',['run_id','execution_id']],
+ ['preview-recovery',['run_id','execution_id','expected_revision']],
+ ['get-recovery-preview',['run_id','preview_ref']],
+ ['revalidate-recovery-preview',['run_id','preview_ref']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -43,6 +46,7 @@ const runApprovalRequests=new Map([
 ]);
 const armOperations=new Set(['create-arm-context','record-arm-preflight','arm','observe-and-arm','complete-arm']);
 const revocationOperations=new Set(['create-revocation-context','revoke','lookup-revocation']);
+const recoveryPreviewOperations=new Set(['preview-recovery','get-recovery-preview','revalidate-recovery-preview']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -82,8 +86,11 @@ function failure(error){
  if(['run_proposal_request','run_approval_request','run_approval_targets','run_approval_revocation_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
   'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict',
-  'run_recovery_execution_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_recovery_execution_conflict','run_recovery_preview_changed'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='run_preflight_expired'||code==='run_recovery_protection_expired')return [409,'PREFLIGHT_EXPIRED'];
+ if(code==='run_recovery_preview_reference')return [400,'INVALID_REQUEST'];
+ if(code==='run_recovery_preview_missing')return [404,'NOT_FOUND'];
+ if(code==='run_recovery_preview_capacity')return [429,'CAPACITY_EXCEEDED'];
  if(code==='run_arm_preflight_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
  if(['run_arm_request','run_preflight_reference'].includes(code))return [422,'INVALID_REQUEST'];
@@ -157,6 +164,9 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'inspect-recovery-evidence':return runs.inspectRecoveryEvidence(handle,request.run_id,request.execution_id);
    case 'observe-recovery-protection':return runs.observeRecoveryProtection(handle,request.run_id,request.execution_id);
    case 'preflight-recovery':return runs.preflightRecovery(handle,request.run_id,request.execution_id);
+   case 'preview-recovery':return runs.previewRecovery(handle,request.run_id,request.execution_id,request.expected_revision);
+   case 'get-recovery-preview':return runs.getRecoveryPreview(handle,request.run_id,request.preview_ref);
+   case 'revalidate-recovery-preview':return runs.revalidateRecoveryPreview(handle,request.run_id,request.preview_ref);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -226,7 +236,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     revocationOperations.has(body.operation)&&!runs.revokeApproval||
     body.operation==='inspect-recovery-evidence'&&!runs.inspectRecoveryEvidence||
     body.operation==='observe-recovery-protection'&&!runs.observeRecoveryProtection||
-    body.operation==='preflight-recovery'&&!runs.preflightRecovery)){empty(res,404);return;}
+    body.operation==='preflight-recovery'&&!runs.preflightRecovery||
+    recoveryPreviewOperations.has(body.operation)&&!runs.previewRecovery)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

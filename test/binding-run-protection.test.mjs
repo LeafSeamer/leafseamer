@@ -394,7 +394,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
- ['人员恢复预检采用当前命令核销并保留历史未知终态','32',null,'validated','terminal_reconciled'],
+ ['人员恢复预览固定当前命令核销并保留历史未知终态','40',null,'validated','terminal_reconciled'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
@@ -1181,11 +1181,44 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(await preflight(),readPreflight('unconfirmed','unresolved',unresolved));
           resourceReply=()=>({adjudication:savedAdjudication,terminal:submission.terminal,resource});
           assert.deepEqual(await preflight(),readPreflight('verified','released',resource));
+          const requestPreview={...request,expected_revision:expected.run_revision};
+          assert.deepEqual(await httpsRead({...requestPreview,expected_revision:'5'},'preview-recovery'),
+           {status:409,body:{error:'REVISION_CONFLICT'}});
+          const created=await httpsRead(requestPreview,'preview-recovery');
+          assert.equal(created.status,200,JSON.stringify(created.body));
+          const {preview_ref,preview}=created.body.result;
+          assert.equal(preview_ref.digest,digest(preview));
+          assert.equal(preview.snapshot.slot.active_run_id,run.run_id);
+          assert.equal(preview.snapshot.latch_set_digest,digest(expected.pause_latches));
+          assert.equal(preview.snapshot.execution_ref.digest,expected.execution_ref.digest);
+          assert.equal(preview.snapshot.recovery_evidence_state,'verified');
+          assert.deepEqual(preview.plan.target_scopes,[target]);
+          assert.equal(preview.plan.mode,'blocked');
+          assert.equal(preview.plan.items[0].decision,'stop');
+          assert.equal(preview.plan.items[0].reason,'effect_unresolved');
+          const byRef={run_id:run.run_id,preview_ref};
+          assert.deepEqual(await httpsRead(byRef,'get-recovery-preview'),created);
+          assert.deepEqual(await httpsRead(byRef,'revalidate-recovery-preview'),created);
+          transportChanged=true;
+          assert.deepEqual(await httpsRead(byRef,'revalidate-recovery-preview'),{status:409,body:{error:'REVISION_CONFLICT'}});
+          transportChanged=false;
+          assert.throws(()=>db.exec('DELETE FROM automation_recovery_preview'),/immutable_recovery_preview/);
+          const afterRestart=automationRunStore({...assembly,bootId:id()});
+          assert.deepEqual(afterRestart.getRecoveryPreview(null,run.run_id,preview_ref),created.body.result);
+          assert.throws(()=>afterRestart.revalidateRecoveryPreview(null,run.run_id,preview_ref),{code:'run_recovery_protection_expired'});
           observeProtectionReply=report('indeterminate');
           const blocked=readPreflight('verified','released',resource);
           blocked.body.result.current_protection={state:'unconfirmed',targets:[{target_scope:target,state:'indeterminate'}]};
           blocked.body.result.recovery_evidence_state='unconfirmed';
           assert.deepEqual(await preflight(),blocked);
+          assert.deepEqual(await httpsRead(byRef,'revalidate-recovery-preview'),{status:409,body:{error:'REVISION_CONFLICT'}});
+          tick=BigInt(preview.window.expires_tick_ns);
+          assert.deepEqual(await httpsRead(byRef,'revalidate-recovery-preview'),{status:409,body:{error:'PREFLIGHT_EXPIRED'}});
+          assert.deepEqual(await httpsRead(byRef,'get-recovery-preview'),created);
+          principalKind='service';
+          assert.deepEqual(await httpsRead(byRef,'get-recovery-preview'),{status:403,body:{error:'PERMISSION_DENIED'}});
+          principalKind='human';
+          assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_preview').pluck().get(),1);
           assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,submission.terminal);
          }
          reads=1;

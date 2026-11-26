@@ -56,11 +56,7 @@ export function armAdmissionStore({db,scope,policy,artifactSize}){
  }
  function assess(observation,basis){
   inside();
-  if(!policy||basis.slot.active_run_id!==null||observation.sources.some(({state,source,transport})=>{
-   const continuity=source?.continuity;
-   return state!=='synchronized'||!continuity||transport?.state!=='ready'||transport.connection_generation!==continuity.connection_generation||
-    transport.ack_cursor==null||BigInt(transport.ack_cursor)<BigInt(continuity.delivery_cursor);
-  })||
+  if(!policy||basis.slot.active_run_id!==null||!observation.sources.every(hasCurrentSourceContinuity)||
    observation.control_observations.some(target=>!target.devices||target.devices.some(device=>device.state!=='automatic'||device.control.gate_state!=='protected')))return null;
   const result=policyOffer(observation,basis);
   return result&&budgetFits(result.capacity,result.required)?result:null;
@@ -104,4 +100,11 @@ export function armAdmissionStore({db,scope,policy,artifactSize}){
  },forRun(run){
   inside();const row=db.prepare(select+' WHERE run_id=?').raw().get(run.run_id);return row?read(row):null;
  },prior(key){inside();const row=db.prepare(select+' WHERE request_identity=?').raw().get(key);return row?read(row):null;}});
+}
+
+export function hasCurrentSourceContinuity({state,source,transport}){
+ const continuity=source?.continuity;
+ return state==='synchronized'&&Boolean(continuity)&&transport?.state==='ready'&&
+  transport.connection_generation===continuity.connection_generation&&transport.ack_cursor!=null&&
+  BigInt(transport.ack_cursor)>=BigInt(continuity.delivery_cursor);
 }

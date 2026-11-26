@@ -142,7 +142,7 @@ async function initialize(input,native=null){
   seamerInitial=input;
   seamerDirectory=directory;seamerIssuer=issuer;
   if(!native){harness.after(()=>{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));fs.rmSync(directory,{recursive:true,force:true,maxRetries:5,retryDelay:50});});initializeStorage(directory);}
-  const service=migrateStorage(directory,input.scheduledAdmission?'39':input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
+  const service=migrateStorage(directory,input.scheduledAdmission?'40':input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
   // 双端测试授时装配有固定时代偏移，年龄上限只用于这份临时安装批准。
   const agePolicy=input.executionSource?{event_age_limits:[{...input.executionSource,capture_semantics:'event_occurrence',max_age_ms:90000}],max_condition_nodes:64}:null;
   publication=publicationMaterial({authority_service_id:service.service_id,database_instance_id:service.database_instance_id},

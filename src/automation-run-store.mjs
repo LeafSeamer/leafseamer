@@ -5,7 +5,7 @@ import {readReceiveCursor} from './reconcile-inbox.mjs';
 import {assertRunGrantParameters,constrainRunTargets} from './run-approval-parameters.mjs';
 import {peerScope,proposalTarget,proposalWindowEnd} from './runtime/peer-run-approval-proposal.mjs';
 import {runApprovalStore} from './run-approval-store.mjs';
-import {armAdmissionStore} from './arm-admission-store.mjs';
+import {armAdmissionStore,hasCurrentSourceContinuity} from './arm-admission-store.mjs';
 import {armCompletionStore} from './arm-completion-store.mjs';
 import {armPreparationReceiptStore} from './arm-preparation-receipt-store.mjs';
 import {pairingReference} from './runtime/peer-pairing-value.mjs';
@@ -16,6 +16,7 @@ import {evaluateScheduledCondition,evaluateTriggerCondition,eventInputSnapshots}
 import {automationExecutionStore,selectedExecutionSteps} from './automation-execution-store.mjs';
 import {automationSubmissionStore} from './automation-submission-store.mjs';
 import {automationExecutionCommit,completionEvidence,mayContinueAfterFailure,nextExecutionRevision} from './automation-execution-commit.mjs';
+import {automationRecoveryPreviewStore,recoveryPlan} from './automation-recovery-preview.mjs';
 
 const fields=(value,names)=>value&&Object.keys(value).sort().join(',')===names;
 const view=({last_receive_cursor,ingest_revision,dependency_digest,run_arm_completion_ref,arm_source_baselines,trigger_pause_revision,...run})=>({...run,last_receive_seq:last_receive_cursor.receive_sequence});
@@ -146,6 +147,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const withRunCommit=Number(service.schema_revision)>=32;
  const withScheduledRuntime=Number(service.schema_revision)>=39&&schedules!==null;
  const executionCommits=withRunCommit?automationExecutionCommit(db):null;
+ const recoveryPreviews=Number(service.schema_revision)>=40?automationRecoveryPreviewStore({db,scope,bootId,requestEpoch:service.request_epoch}):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
  const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules,withScheduledRuntime}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
@@ -1272,7 +1274,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {body:structuredClone(captured.body),beforeSend};
   }finally{pendingPlans--;}
  }
- function recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources=false){
+ function recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources=false,previewRevision=null){
   const original=proposalRun(runId),proof=authorize(authentication,'getRun',original.definition_id,null);
   need(proof.actor.principal_kind==='human','local_authorization_human');
   const run=currentRun(original);
@@ -1283,6 +1285,21 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    'run_recovery_execution_conflict');
   const approval_ref=registered.operation.approval_ref;
   const protection=approvals.recoveryProtectionInTransaction(run,approval_ref,run.arm_generation);
+  let previewBasis;
+  if(previewRevision!==null){
+   need(run.revision===previewRevision,'run_recovery_execution_conflict');
+   const slot=slotFor(run.definition_id),dependencies=readDependencies(run);
+   need(slot.active_run_id===runId&&slot.revision===value.execution.activation_slot_revision,
+    'run_recovery_execution_conflict');
+   previewBasis={scope,definition_id:run.definition_id,definition_version:run.definition_version,artifact_ref:run.artifact_ref,
+    slot,business_state:run.business_state,dependency_digest:dependencies.digest,ingest_revision:run.ingest_revision,
+    receive_cursor:readReceiveCursor(db,scope),run_receive_cursor:run.last_receive_cursor,
+    trigger_pause_revision:run.trigger_pause_revision??null,latch_set_digest:digest(run.pause_latches),
+    publication_current:publicationBasisCurrent(run),source_baselines:run.arm_source_baselines??[],
+    target_scopes:registered.operation.targets.map(({controller_scope})=>controller_scope),
+    sources:resolveAutomationSourcesInTransaction(dependencies.body.dependencies.inputs),
+    unresolved_latch_ids:run.pause_latches.filter(id=>id!==executionId&&id!==protection?.operation_ref.object_id)};
+  }
   const commands=[];
   const steps=value.steps.flatMap(({plan,submission})=>{
    if(plan.payload.kind!=='action')return [];
@@ -1300,7 +1317,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   });
   need(same(proof,authorize(authentication,'getRun',run.definition_id,null)),'run_authorization_changed');
   return {proof,evidence:{run_id:runId,run_revision:run.revision,execution_ref:value.execution_ref,arm_generation:run.arm_generation,
-   pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps},...(includeResources&&{commands})};
+   pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps},...(includeResources&&{commands}),
+   ...(previewBasis&&{previewBasis,execution:value.execution,executionSteps:value.steps})};
  }
  function recoveryCommandResource(command,reply){
   const {step_id,controller_scope,device_id,submission}=command;
@@ -1314,10 +1332,10 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   if(adjudication.decision==='rejected')return {...step,state:'rejected',adjudication_ref:adjudication.commit_ref};
   return resource?{...step,state:resource.status,resource}:{...step,state:'unconfirmed'};
  }
- async function observeRecoveryProtection(authentication,runId,executionId,includeResources=false){
+ async function observeRecoveryProtection(authentication,runId,executionId,{includeResources=false,previewRevision=null,finish=null}={}){
   checked('LifecycleId',runId);checked('LifecycleId',executionId);
   function capture(){
-   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources),protection=snapshot.evidence.observed_protection;
+   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources,previewRevision),protection=snapshot.evidence.observed_protection;
    const requests=protection?.targets.map(({target_scope})=>approvals.prepareRecoveryProtectionInTransaction(protection.operation_ref,target_scope))??[];
    return {...snapshot,requests};
   }
@@ -1326,6 +1344,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const now=authority.runApprovalTimeInTransaction();
    need(same(now.domain,start.domain)&&now.tick>=start.tick&&now.tick<start.tick+preflightWindowNs&&
     now.tick<start.validBeforeTick,'run_recovery_protection_expired');
+   return now;
   }
   const observe=async(read,pairingRef,request)=>{
    writer(recheckTime);
@@ -1339,6 +1358,12 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    reads.push(()=>observe(readAutomationCommandResource,command.paired?body.pairing_ref:null,body?.request));
   }
   const replies=await inBatches(reads,read=>read());
+  const readySourceIds=[...new Set((initial.previewBasis?.sources??[])
+   .filter(item=>item.state==='synchronized').map(item=>item.source.baseline_ref.apply_id))];
+  const sourceTransports=new Map(await inBatches(readySourceIds,async id=>{
+   writer(recheckTime);
+   try{return [id,await prepareSourceTransport(id)];}catch{return [id,null];}
+  }));
   return writer(()=>{
    const current=capture();
    need(same(initial,current),'run_recovery_execution_conflict');recheckTime();
@@ -1357,9 +1382,65 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const protectionTargets=current.evidence.observed_protection?.targets??[];
    const resourcesVerified=steps.every(step=>['not_submitted','rejected','never_acquired','released'].includes(step.state));
    const allCovered=steps.every(step=>protectionTargets.some(target=>same(target.target_scope,step.controller_scope)&&target.device_ids?.includes(step.device_id)));
-   return {...result,current_resources:{state:resourcesVerified?'verified':'unconfirmed',steps},
+   const evidence={...result,current_resources:{state:resourcesVerified?'verified':'unconfirmed',steps},
     recovery_evidence_state:protectionVerified&&resourcesVerified&&allCovered?'verified':'unconfirmed'};
+   if(!finish)return evidence;
+   const sources=current.previewBasis.sources.map(source=>{
+    const transport=sourceTransports.get(source.source?.baseline_ref.apply_id);
+    if(transport)try{
+     transport.assertCurrentInTransaction();
+     return {...source,transport:transport.observation};
+    }catch{}
+    return {...source,transport:null};
+   });
+   const snapshot={...current.previewBasis,...evidence,sources,source_pause_resolution_refs:[]};
+   const items=recoveryPlan(current.execution,current.executionSteps,evidence.current_resources);
+   const protectedScopes=targets.map(({target_scope})=>target_scope);
+   const ready=evidence.recovery_evidence_state==='verified'&&snapshot.publication_current&&snapshot.unresolved_latch_ids.length===0&&
+    protectedScopes.length===snapshot.target_scopes.length&&snapshot.target_scopes.every(scope=>protectedScopes.some(target=>same(target,scope)))&&
+    sources.every(hasCurrentSourceContinuity)&&items.every(item=>item.decision!=='stop');
+   const mode=!ready?'blocked':items.every(item=>item.decision==='retain_success')?'reconcile_commit':'execute';
+   return finish(snapshot,{mode,items,target_scopes:snapshot.target_scopes},current.proof,start,recheckTime());
   });
+ }
+ function recoveryPreviewInTransaction(authentication,runId,reference){
+  checked('LifecycleId',runId);
+  const run=proposalRun(runId);
+  const proof=authorize(authentication,'getRun',run.definition_id,null);
+  need(proof.actor.principal_kind==='human','local_authorization_human');
+  const saved=recoveryPreviews.read(reference);
+  need(saved.preview.snapshot.run_id===runId,'run_recovery_preview_missing');
+  return {saved,proof};
+ }
+ function checkRecoveryPreviewWindow(window,now){
+  need(window.service_boot_id===bootId&&same(window.domain,now.domain)&&now.tick>=BigInt(window.issued_tick_ns)&&
+   now.tick<BigInt(window.expires_tick_ns),'run_recovery_protection_expired');
+ }
+ function previewRecovery(authentication,runId,executionId,revision){
+  checked('LifecycleRevision',revision);
+  return observeRecoveryProtection(authentication,runId,executionId,{includeResources:true,previewRevision:revision,
+   finish(snapshot,plan,proof,start,now){
+    const expires=start.tick+preflightWindowNs;
+    const window={service_boot_id:bootId,domain:start.domain,issued_tick_ns:String(now.tick),
+     expires_tick_ns:String(expires<start.validBeforeTick?expires:start.validBeforeTick)};
+    checkRecoveryPreviewWindow(window,now);
+    return recoveryPreviews.record(snapshot,plan,window,proof);
+   }});
+ }
+ function revalidateRecoveryPreview(authentication,runId,reference){
+  const {saved,proof}=writer(()=>{
+   const current=recoveryPreviewInTransaction(authentication,runId,reference);
+   checkRecoveryPreviewWindow(current.saved.preview.window,authority.runApprovalTimeInTransaction());
+   return current;
+  });
+  const {snapshot,window,reader,basis_digest,plan_digest}=saved.preview;
+  need(same(reader,{actor:proof.actor,authorization_digest:proof.authorization_digest}),'run_recovery_preview_changed');
+  return observeRecoveryProtection(authentication,snapshot.run_id,snapshot.execution_ref.object_id,
+   {includeResources:true,previewRevision:snapshot.run_revision,finish(current,plan,observed,_start,now){
+    checkRecoveryPreviewWindow(window,now);
+    need(same(proof,observed)&&digest(current)===basis_digest&&digest(plan)===plan_digest,'run_recovery_preview_changed');
+    return saved;
+   }});
  }
  return Object.freeze({
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
@@ -1458,7 +1539,9 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    checked('LifecycleId',runId);checked('LifecycleId',executionId);
    return writer(()=>recoveryEvidenceInTransaction(authentication,runId,executionId).evidence);
   },observeRecoveryProtection:(authentication,runId,executionId)=>observeRecoveryProtection(authentication,runId,executionId),
-  preflightRecovery:(authentication,runId,executionId)=>observeRecoveryProtection(authentication,runId,executionId,true)}),
+  preflightRecovery:(authentication,runId,executionId)=>observeRecoveryProtection(authentication,runId,executionId,{includeResources:true})}),
+  ...(recoveryPreviews&&{previewRecovery,getRecoveryPreview:(authentication,runId,reference)=>writer(()=>recoveryPreviewInTransaction(authentication,runId,reference).saved),
+   revalidateRecoveryPreview}),
   ...(submissions&&{startSubmissionRecovery,async reconcileAutomationSubmission(authentication,executionId,stepId){
    const slot=submissionSlot(executionId,stepId);
    need(!submitting.has(slot),'execution_submission_in_flight');
