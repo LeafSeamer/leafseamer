@@ -380,10 +380,13 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 | `revoke` | `{approval_id, revocation}`。`revocation` 包含 `approval_ref`、`expected_status_revision`、`reason` 和 `context`。`context` 包含 `context_id` 和 `idempotency_key` |
 | `lookup-revocation` | `{approval_id, context_id, idempotency_key}`，查回原请求的摘要和首次受理回执 |
 | `inspect-operation` | `{operation_id}`，返回当前操作和逐目标保护进度 |
+| `inspect-recovery-evidence` | `{run_id, execution_id}`，返回当前暂停运行中该活动执行的保护回执与命令资源证据 |
 
 撤销要求当前人员具备 `run.approval.revoke`、目标定义的权限与近期认证。查回请求时使用原身份和上下文，并核对当前读取权限。成功响应为 `{result}`。同一请求重复提交返回原受理回执，修订冲突或同一幂等键对应不同正文时返回 HTTP 409。
 
 有 Controller 目标时，`accepted` 表示 Seamer 已记录撤销并排队发送保护通知，`applying` 表示仍等待部分或全部目标完成保护。通过 `inspect-operation` 跟踪当前进度。撤销不会释放原活动槽，也不会授权新运行。
+
+恢复证据查询要求人员具有当前 `run.read` 和目标定义权限。`observed_protection` 返回 Seamer 已持久采用的回执引用。各动作分别列出原 Controller、设备、提交状态、命令引用、已观察终态及其中的资源证据引用。`applied` 记录保护回执覆盖的代次和设备，恢复前仍须核对当前保护和逐命令资源证据。即使终态记录为 `clear`，缺少资源释放证据也会阻止可选独立动作的后继和执行完成提交。
 
 ### 本机排期
 

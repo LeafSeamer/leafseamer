@@ -7,9 +7,10 @@ export function nextExecutionRevision(revision){
  return String(next);
 }
 
-export function mayContinueAfterFailure(plan,state){
+export function mayContinueAfterFailure(plan,state,{historical=false}={}){
  return !plan.required&&plan.failure_policy==='continue_if_independent'&&state.outcome==='failed'&&
-  state.resource_status==='clear'&&state.automation_continuation==='eligible';
+  state.resource_status==='clear'&&state.automation_continuation==='eligible'&&
+  (historical||state.resource_evidence_refs.length>0);
 }
 
 export function completionEvidence(steps){

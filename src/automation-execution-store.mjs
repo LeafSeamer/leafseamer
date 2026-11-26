@@ -199,7 +199,7 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
    due_tick_ns:String(due),deadline_tick_ns:String(deadline),window_scope:'direct_successor',anchor:payload.anchor};
  }
  const inWindow=(window,tick)=>tick>=clockInteger(window.body.due_tick_ns)&&tick<clockInteger(window.body.deadline_tick_ns);
- function dependencyEvidence(plan,byStep,tick){
+ function dependencyEvidence(plan,byStep,tick,{historical=false}={}){
   const windows=new Map(),terminals=new Map();
   for(const {from_step_id,edge_kind} of plan.dependencies){
    const predecessor=byStep.get(from_step_id);
@@ -210,7 +210,7 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
    }
    const terminal=predecessor?.submission?.terminal;
    if(!withCommandDependencies||!terminal||!['sequence','requires_success'].includes(edge_kind))return null;
-   if(terminal.state.outcome!=='succeeded'&&!(withRunCommit&&edge_kind==='sequence'&&mayContinueAfterFailure(predecessor.plan,terminal.state)))return null;
+   if(terminal.state.outcome!=='succeeded'&&!(withRunCommit&&edge_kind==='sequence'&&mayContinueAfterFailure(predecessor.plan,terminal.state,{historical})))return null;
    terminals.set(from_step_id,{step_id:from_step_id,terminal_digest:digest(terminal)});
   }
   return {windows:[...windows.values()],terminals:[...terminals.values()]};
@@ -237,7 +237,8 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
   const byStep=new Map(value.steps.map(step=>[step.plan.step_id,step]));
   for(const {plan,ready} of value.steps){
    if(!ready)continue;
-   const evidence=dependencyEvidence(plan,byStep,clockInteger(ready.body.clock.tick_ns));
+   // 已持久化的就绪原件沿用记录时的证据判据。
+   const evidence=dependencyEvidence(plan,byStep,clockInteger(ready.body.clock.tick_ns),{historical:true});
    need(evidence&&same(ready.body.delay_window_refs??[],evidence.windows.map(window=>window.ref))&&
     same(ready.body.command_terminal_refs??[],evidence.terminals),'execution_plan_integrity');
   }

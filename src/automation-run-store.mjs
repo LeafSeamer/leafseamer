@@ -1365,6 +1365,33 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {...protectedResult,completion,reconciliation_required:!completion&&result.execution.activation_slot_revision!==undefined&&
     Boolean(protectedResult.protection||result.execution.service_boot_id!==bootId)&&completionEvidence(result.steps)!==null};
   });}}),
+  ...(executionCommits&&{inspectRecoveryEvidence(authentication,runId,executionId){
+   checked('LifecycleId',runId);checked('LifecycleId',executionId);
+   return writer(()=>{
+    const original=proposalRun(runId),proof=authorize(authentication,'getRun',original.definition_id,null);
+    need(proof.actor.principal_kind==='human','local_authorization_human');
+    const run=currentRun(original);
+    need(run.lifecycle==='paused'&&run.active_execution_id===executionId,'run_recovery_execution_conflict');
+    const value=executions.read(executionId),registered=arm.forRun(run);
+    need(value&&registered&&value.execution.run_id===runId&&value.execution.arm_generation===run.arm_generation&&
+     value.execution.activation_slot.active_operation_id===registered.operation.operation_id&&!executionCommits.read(executionId),
+     'run_recovery_execution_conflict');
+    const approval_ref=registered.operation.approval_ref;
+    const protection=approvals.recoveryProtectionInTransaction(run,approval_ref,run.arm_generation);
+    const steps=value.steps.flatMap(({plan,submission})=>{
+     if(plan.payload.kind!=='action')return [];
+     const {controller_scope,device_action}=plan.payload.binding.target;
+     const terminal=submission?.terminal;
+     return [{step_id:plan.step_id,controller_scope,device_id:device_action.device_id,submission_digest:submission?.digest??null,
+      submission_state:submission?.state??'not_recorded',command_ref:submission?.adjudication?.command_ref??null,
+      terminal:terminal?{state_ref:terminal.state_ref,outcome:terminal.state.outcome,resource_status:terminal.state.resource_status,
+       resource_evidence_refs:terminal.state.resource_evidence_refs}:null}];
+    });
+    need(same(proof,authorize(authentication,'getRun',run.definition_id,null)),'run_authorization_changed');
+    return {run_id:runId,run_revision:run.revision,execution_ref:value.execution_ref,arm_generation:run.arm_generation,
+     pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps};
+   });
+  }}),
   ...(submissions&&{startSubmissionRecovery,async reconcileAutomationSubmission(authentication,executionId,stepId){
    const slot=submissionSlot(executionId,stepId);
    need(!submitting.has(slot),'execution_submission_in_flight');

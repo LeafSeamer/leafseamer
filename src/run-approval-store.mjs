@@ -109,19 +109,38 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
   const reply=verifyCompletion(decode(row[1],row[2]),notice,rejection);
   need(reply.receipt_id===row[0],'run_approval_integrity');return reply;
  }
+ function protectionObservation(operation,saved,target){
+  const id=operation.result.operation_id,notice=protectionNotice(id,target,saved,operation);
+  const rejection=protectionReceipt(id,target,notice),complete=protectionCompletion(id,target,notice,rejection),receipt=complete??rejection;
+  const receipt_ref=receipt?{kind:complete?'run_approval_protection_receipt':'run_approval_rejection_receipt',
+   scope:target,object_id:receipt.receipt_id,revision:'1',digest:digest(receipt)}:null;
+  return {notice,complete,receipt_ref};
+ }
  function revocationView(record,saved){
   const result=record.result;
   if(!canAdoptProtection||result.state==='applied')return result;
   const targets=result.targets.map(entry=>{
-   const target=entry.target_scope,id=result.operation_id,notice=protectionNotice(id,target,saved,record);
-   const receipt=protectionReceipt(id,target,notice),complete=protectionCompletion(id,target,notice,receipt);
-   if(complete)return {...entry,state:'applied',receipt_ref:{kind:'run_approval_protection_receipt',scope:target,
-    object_id:complete.receipt_id,revision:'1',digest:digest(complete)}};
-   return receipt?{...entry,receipt_ref:{kind:'run_approval_rejection_receipt',scope:target,object_id:receipt.receipt_id,revision:'1',digest:digest(receipt)}}:entry;
+   const {complete,receipt_ref}=protectionObservation(record,saved,entry.target_scope);
+   return {...entry,state:complete?'applied':entry.state,receipt_ref};
   });
   const applied=targets.every(entry=>entry.state==='applied');
   if(applied)need(saved.state==='revoked','run_approval_integrity');
   return {...result,state:applied?'applied':targets.some(entry=>entry.receipt_ref!==null)?'applying':result.state,targets};
+ }
+ function recoveryProtectionInTransaction(run,approvalRef,generation){
+  need(db.inTransaction,'run_approval_transaction');
+  const row=db.prepare(revocations+' WHERE approval_id=?').raw().get(approvalRef.object_id);
+  if(!row)return null;
+  const saved=read(db.prepare(records+' WHERE a.approval_id=?').raw().get(approvalRef.object_id));
+  need(saved.approval.run_id===run.run_id&&same(saved.object_ref,approvalRef),'run_approval_integrity');
+  const operation=readRevocation(row,saved);
+  const targets=operation.result.targets.map(({target_scope})=>{
+   const {notice,complete,receipt_ref}=protectionObservation(operation,saved,target_scope);
+   need(notice.arm_generations.some(item=>item.run_id===run.run_id&&item.arm_generation===generation),'run_approval_protection_completion');
+   return {target_scope,receipt_ref,state:complete?'applied':receipt_ref?'denied':'pending',
+    deny_through_generation:complete?.deny_through_generation??null,device_ids:complete?.device_ids??null};
+  });
+  return {operation_ref:operation.reference,targets};
  }
  function adoptBindingRevocations(){
   const candidates=writer(()=>db.prepare(`SELECT h.approval_id,h.run_id FROM automation_run_approval_head h
@@ -522,6 +541,7 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
     return {request_digest:row?.[4]??null,result:row?readRevocation(row,saved).result:null};
    });
   });
- }}),...(canAdoptProtection&&{scanApprovalProtection,deliverApprovalProtection}),...(bindingRevocationForRun&&{adoptBindingRevocations}),
+ }}),...(canAdoptProtection&&{scanApprovalProtection,deliverApprovalProtection}),...(canCompleteProtection&&{recoveryProtectionInTransaction}),
+ ...(bindingRevocationForRun&&{adoptBindingRevocations}),
  ...(rejectFromPeer&&{receiveEndorsementRevocation})});
 }

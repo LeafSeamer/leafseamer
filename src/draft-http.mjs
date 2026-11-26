@@ -31,6 +31,7 @@ const runApprovalRequests=new Map([
  ['revoke',['approval_id','revocation']],
  ['lookup-revocation',['approval_id','context_id','idempotency_key']],
  ['inspect-operation',['operation_id']],
+ ['inspect-recovery-evidence',['run_id','execution_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -78,7 +79,8 @@ function failure(error){
  if(code==='conflict')return [409,'REVISION_CONFLICT'];
  if(['run_proposal_request','run_approval_request','run_approval_targets','run_approval_revocation_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
-  'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict',
+  'run_recovery_execution_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='run_preflight_expired')return [409,'PREFLIGHT_EXPIRED'];
  if(code==='run_arm_preflight_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
@@ -150,6 +152,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'revoke':return runs.revokeApproval(handle,request.approval_id,request.revocation);
    case 'lookup-revocation':return runs.lookupApprovalRevocation(handle,request);
    case 'inspect-operation':return runs.getApprovalOperation(handle,request.operation_id);
+   case 'inspect-recovery-evidence':return runs.inspectRecoveryEvidence(handle,request.run_id,request.execution_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -216,7 +219,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     else if(body.operation!=='replace')fail('local_authorization_request');
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
    if(req.url===runApprovalPath&&(armOperations.has(body.operation)&&!localRunArm||
-    revocationOperations.has(body.operation)&&!runs.revokeApproval)){empty(res,404);return;}
+    revocationOperations.has(body.operation)&&!runs.revokeApproval||
+    body.operation==='inspect-recovery-evidence'&&!runs.inspectRecoveryEvidence)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

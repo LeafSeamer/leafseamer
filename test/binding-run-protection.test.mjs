@@ -393,13 +393,15 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['定时执行跨启动域保持保护并保留原活动槽','39',null,'validated','r5_scheduled_restart'],
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
+ ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
 ])test('布防受理、回执采用和最终提交保留同一操作：'+label,async t=>{
  const registration=eventRegistration(),hasTarget=schema_revision!=='16',executionPlanning=Number(schema_revision)>=25;
  const withTerminals=Number(schema_revision)>=30;
- const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5Optional=commandCase==='r5_optional';
+ const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5MissingRelease=commandCase==='r5_missing_release';
+ const r5Optional=commandCase==='r5_optional'||r5MissingRelease;
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
  const scheduledRestart=commandCase==='r5_scheduled_restart';
  const scheduledRuntime=scheduledRestart||commandCase==='r5_scheduled_runtime',scheduleCase=scheduledRuntime||commandCase==='r5_schedule';
@@ -434,6 +436,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  try{
   const target=hasTarget?{authority_service_id:id(),database_instance_id:id()}:null;
   const action={device_id:id(),action_id:'simulator.value.set',capability_version:'1.0.0'};
+  const peerMaterials=hasTarget?peerCertificates():null;
   const sampledAt=Date.now(),epoch=BigInt(sampledAt)*1000000n;
   const validity={not_before:new Date(sampledAt-60000).toISOString(),not_after:new Date(sampledAt+60000).toISOString()};
   const pairing={binding_id:id(),revision:'1',digest:digest('current peer pairing'),peer_service_id:target?.authority_service_id,transcript:{pair_attempt_id:id(),parties:[
@@ -584,7 +587,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    const beforeWithdrawal=await release();currentInitiator=false;
    assert.throws(beforeWithdrawal.beforeSend,{code:'test_arm_initiator_withdrawn'});currentInitiator=true;
 
-   const {leaves:[aMaterial,bMaterial],ca}=peerCertificates();
+   const {leaves:[aMaterial,bMaterial],ca}=peerMaterials;
    let tickOffset=0n;
    const clock={pairingSample:()=>({lower_ns:String(epoch),upper_ns:String(epoch),tick_ns:String(process.hrtime.bigint()+tickOffset),runtime_domain_ref:domain})};
    async function peer(serviceScope,service_kind,material,options){
@@ -1033,7 +1036,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            outcome:suppliedSuccess?'succeeded':r5Optional?'failed':'unknown',effect_status:suppliedSuccess?'verified':r5Optional?'not_sent':'possible',
            resource_status:suppliedSuccess||r5Optional?'clear':'unresolved',automation_continuation:suppliedSuccess||r5Optional?'eligible':'paused_latched',
            reason_code:suppliedSuccess?null:r5Optional?'controller_command_failed':'evidence_unresolved',terminal_revision:'5',resolution_ref:null,attempt_ids:[id()],
-           completion_evidence_refs:suppliedSuccess?[evidence('decision')]:[],resource_evidence_refs:suppliedSuccess||r5Optional?[evidence('release')]:[]};
+           completion_evidence_refs:suppliedSuccess?[evidence('decision')]:[],
+           resource_evidence_refs:suppliedSuccess||r5Optional&&!r5MissingRelease?[evidence('release')]:[]};
           const terminal={format:'leafseamer.automation-command-terminal/1',command_ref,state,
            record_ref:{...command_ref,revision:'5',digest:digest('terminal record')},
            state_ref:{id:command_ref.object_id+'_state_5',revision:'5',digest:digest(state)},
@@ -1068,11 +1072,12 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
            readDb.exec('DROP TRIGGER omit_terminal_protection');
           }
           if(!activeDependency)recovered.startSubmissionRecovery();
-          const observed=await waitForTerminal(value=>r5?(r5Protected?value.reconciliation_required:value.completion):
+          const observed=await waitForTerminal(value=>r5MissingRelease?value.protection&&readStep(value).submission.terminal:
+           r5?(r5Protected?value.reconciliation_required:value.completion):
            activeDependency?value.steps[1].elapsed:readStep(value).submission.terminal);
           assert.deepEqual(readStep(observed).submission.terminal,terminal);
-          assert.equal(observed.protection,(suppliedSuccess||r5Optional)&&!afterProtection&&!r5Protected?null:'execution_runtime_unavailable');
-          if(activeDependency){
+          assert.equal(observed.protection,(suppliedSuccess||r5Optional)&&!afterProtection&&!r5Protected&&!r5MissingRelease?null:'execution_runtime_unavailable');
+          if(activeDependency&&!r5MissingRelease){
            assert.deepEqual(observed.steps[1].ready.body.command_terminal_refs,[{step_id:'first',terminal_digest:digest(terminal)}]);
            assert.deepEqual(observed.steps[1].window.body.execution_anchor_ref,observed.anchor.ref);
            assert.equal(observed.steps[1].window.body.anchor_tick_ns,observed.anchor.body.clock.tick_ns);
@@ -1084,6 +1089,60 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          }
          assert.throws(()=>db.exec(`DELETE FROM ${table}`),/immutable_execution_submission_attempt/);
         }finally{recovered.stopExecutionTimers();readDb.close();}
+       }
+       if(r5MissingRelease){
+        const executionId=decision.execution_id,request={run_id:run.run_id,execution_id:executionId};
+        const inspectRecovery=()=>runs.inspectRecoveryEvidence(null,run.run_id,executionId);
+        const initial=inspectRecovery(),submission=readStep(originalExecution).submission;
+        assert.equal(initial.observed_protection,null);
+        assert.deepEqual(initial.steps,[{step_id:'first',controller_scope:target,device_id:action.device_id,
+         submission_digest:submission.digest,submission_state:'accepted',command_ref:submission.adjudication.command_ref,
+         terminal:{state_ref:submission.terminal.state_ref,outcome:'failed',resource_status:'clear',resource_evidence_refs:[]}}]);
+        assert.deepEqual(initial.execution_ref,originalExecution.execution_ref);
+        const revoked=runs.revokeApproval(null,saved.operation.approval_ref.object_id,{context:{context_id:contextId,idempotency_key:id()},
+         approval_ref:saved.operation.approval_ref,expected_status_revision:'1',reason:'核对旧执行'});
+        const {notice}=runs.prepareApprovalProtection(revoked.operation_id,target);
+        const operation_ref=notice.revocation_operation_ref;
+        const pending={target_scope:target,state:'pending',receipt_ref:null,deny_through_generation:null,device_ids:null};
+        assert.deepEqual(inspectRecovery().observed_protection,{operation_ref,targets:[pending]});
+        const rejection={format:'leafseamer.run-approval-rejection/1',receipt_id:id(),target_scope:target,approval_ref:notice.approval_ref,
+         endorsement_ref:notice.endorsement_ref,revocation_operation_ref:operation_ref,request_digest:digest(notice),
+         identity_state:'denied',protection_state:'pending'};
+        remoteProtection=rejection;
+        await runs.deliverApprovalProtection(revoked.operation_id,target);
+        assert.deepEqual(inspectRecovery().observed_protection,{operation_ref,targets:[{...pending,state:'denied',
+         receipt_ref:ref('run_approval_rejection_receipt',target,rejection.receipt_id,digest(rejection))}]});
+        const applied={format:'leafseamer.run-approval-protection/1',receipt_id:id(),rejection,run_id:run.run_id,
+         deny_through_generation:'1',device_ids:[action.device_id],proof_digest:digest('test exit protection'),protection_state:'applied'};
+        remoteProtection=applied;
+        await runs.deliverApprovalProtection(revoked.operation_id,target);
+        const expected={...initial,run_revision:'6',pause_latches:[revoked.operation_id,executionId],observed_protection:{operation_ref,
+         targets:[{...pending,state:'applied',receipt_ref:ref('run_approval_protection_receipt',target,applied.receipt_id,digest(applied)),
+          deny_through_generation:'1',device_ids:[action.device_id]}]}};
+        const {leaves:[listener],ca}=peerCertificates();
+        const app=await startDraftHttp({cert:listener.cert,key:listener.key,bindingId:id(),service:assembly.service,bootId:boot,
+         receiver:{async prepare(){return null;}},authorization:{},drafts:{},runs,localRunApprovals:true});
+        const httpsRead=payload=>new Promise((resolve,reject)=>{
+         const body=Buffer.from(canonical({operation:'inspect-recovery-evidence',request:payload}));
+         const req=https.request(new URL('/auth/local-run-approvals/v1',app.origin),{method:'POST',ca,agent:false,
+          headers:{Authorization:'Bearer v1.'+id()+'.'+'A'.repeat(43),'Content-Type':'application/json','Content-Length':body.length}},response=>{
+          const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('error',reject);
+          response.on('end',()=>resolve({status:response.statusCode,body:JSON.parse(Buffer.concat(chunks))}));
+         });
+         req.on('error',reject);req.end(body);
+        });
+        try{
+         assert.deepEqual(await httpsRead(request),{status:200,body:{result:expected}});
+         assert.deepEqual(await httpsRead({...request,execution_id:id()}),{status:409,body:{error:'REVISION_CONFLICT'}});
+         principalKind='service';
+         assert.deepEqual(await httpsRead(request),{status:403,body:{error:'PERMISSION_DENIED'}});
+        }finally{principalKind='human';await app.close();}
+        assert.equal(runs.get(null,run.run_id).active_execution_id,executionId);
+        assert.equal(runs.get(null,run.run_id).lifecycle,'paused');
+        assert.equal(db.prepare('SELECT count(*) FROM automation_execution_commit').pluck().get(),0);
+        assert.equal(commandSubmits,1);
+        assert.deepEqual(db.pragma('foreign_key_check'),[]);
+        return;
        }
        if(r5){
         const done=runs.get(null,run.run_id);
