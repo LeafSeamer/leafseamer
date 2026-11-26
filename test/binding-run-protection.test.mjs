@@ -394,6 +394,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 状态机原子提交目标状态，后续按新状态匹配','32',null,'validated','r5_state'],
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
+ ['人员恢复预检采用当前命令核销并保留历史未知终态','32',null,'validated','terminal_reconciled'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
@@ -476,7 +477,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
   let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
-  let observeProtectionReply=null;
+  let observeProtectionReply=null,resourceReply=null;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
@@ -498,6 +499,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    submitAutomationCommand(...args){return seamerTransport.submitAutomationCommand(...args);},
    lookupAutomationCommand(...args){return seamerTransport.lookupAutomationCommand(...args);},
    readAutomationCommandResult(...args){return seamerTransport.readAutomationCommandResult(...args);},
+   readAutomationCommandResource(...args){return seamerTransport.readAutomationCommandResource(...args);},
    sendApprovalProtection(...args){return seamerTransport.deliverRunApprovalProtection(...args);},
    observeApprovalProtection(...args){return seamerTransport.observeRunApprovalProtection(...args);},
    authorizeControllerPeerInTransaction(binding,socket){assert.equal(binding,pairing.binding_id);if(socket)assert.equal(socket.authorized,true);
@@ -657,6 +659,10 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      assert.equal(socket.authorized,true);
      assert.deepEqual(request,sentCommand);terminalReads++;
      return {adjudication:savedAdjudication,terminal:terminalReply};
+    },resource(_binding,socket,request){
+     assert.equal(socket.authorized,true);
+     assert.deepEqual(request,sentCommand);
+     return resourceReply();
     }
    }:null;
    const [a,b]=await Promise.all([peer(target,'controller',aMaterial,{automationCommands:commands,runApprovalProtection(_binding,socket,notice,options){
@@ -1034,7 +1040,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(await readResult(),{adjudication:savedAdjudication,terminal:null});
           const activeDependency=commandCase==='terminal_dependency'||r5;
           const afterProtection=commandCase==='terminal_after_protection';
-          const suppliedSuccess=commandCase!=='terminal_unknown'&&!r5Optional,command_ref=savedAdjudication.command_ref;
+          const suppliedSuccess=!['terminal_unknown','terminal_reconciled'].includes(commandCase)&&!r5Optional,command_ref=savedAdjudication.command_ref;
           const evidence=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
           const state={command_id:command_ref.object_id,scope:target,revision:'5',phase:'finished',
            outcome:suppliedSuccess?'succeeded':r5Optional?'failed':'unknown',effect_status:suppliedSuccess?'verified':r5Optional?'not_sent':'possible',
@@ -1094,14 +1100,15 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          assert.throws(()=>db.exec(`DELETE FROM ${table}`),/immutable_execution_submission_attempt/);
         }finally{recovered.stopExecutionTimers();readDb.close();}
        }
-       if(r5MissingRelease){
+       if(r5MissingRelease||commandCase==='terminal_reconciled'){
         const executionId=decision.execution_id,request={run_id:run.run_id,execution_id:executionId};
         const inspectRecovery=()=>runs.inspectRecoveryEvidence(null,run.run_id,executionId);
         const initial=inspectRecovery(),submission=readStep(originalExecution).submission;
         assert.equal(initial.observed_protection,null);
         assert.deepEqual(initial.steps,[{step_id:'first',controller_scope:target,device_id:action.device_id,
          submission_digest:submission.digest,submission_state:'accepted',command_ref:submission.adjudication.command_ref,
-         terminal:{state_ref:submission.terminal.state_ref,outcome:'failed',resource_status:'clear',resource_evidence_refs:[]}}]);
+         terminal:{state_ref:submission.terminal.state_ref,outcome:r5MissingRelease?'failed':'unknown',
+          resource_status:r5MissingRelease?'clear':'unresolved',resource_evidence_refs:[]}}]);
         assert.deepEqual(initial.execution_ref,originalExecution.execution_ref);
         const revoked=runs.revokeApproval(null,saved.operation.approval_ref.object_id,{context:{context_id:contextId,idempotency_key:id()},
          approval_ref:saved.operation.approval_ref,expected_status_revision:'1',reason:'核对旧执行'});
@@ -1144,10 +1151,44 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           return {format:'leafseamer.run-approval-protection-observation/1',challenge_id,request_digest:digest(notice),state,completion};
          };
          const liveRead=()=>httpsRead(request,'observe-recovery-protection');
+         const preflight=()=>httpsRead(request,'preflight-recovery');
          const view=(targetState,state='unconfirmed')=>({status:200,body:{result:{...expected,
           current_protection:{state,targets:[{target_scope:target,state:targetState}]}}}});
          observeProtectionReply=report('verified');
          assert.deepEqual(await liveRead(),view('verified','verified'));
+         const readPreflight=(state,stepState,resource=null)=>{
+          const value=view('verified','verified');
+          value.body.result.current_resources={state,steps:[{step_id:'first',controller_scope:target,device_id:action.device_id,
+           state:stepState,resource}]};
+          value.body.result.recovery_evidence_state=state;
+          return value;
+         };
+         resourceReply=()=>({adjudication:savedAdjudication,terminal:null,resource:null});
+         assert.deepEqual(await preflight(),readPreflight('unconfirmed','unconfirmed'));
+         resourceReply=()=>({adjudication:null,terminal:null,resource:null});
+         assert.deepEqual(await preflight(),readPreflight('unconfirmed','unconfirmed'));
+         resourceReply=()=>{throw Error('test unavailable resource');};
+         assert.deepEqual(await preflight(),readPreflight('unconfirmed','unavailable'));
+         if(!r5MissingRelease){
+          const evidence=kind=>({id:savedAdjudication.command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
+          const resource={format:'leafseamer.automation-command-resource/1',record_ref:{...submission.terminal.record_ref,revision:'6',digest:digest('resolved')},
+           state_ref:{...evidence('resolved state'),id:savedAdjudication.command_ref.object_id+'_state_6',revision:'6'},
+           hold_ref:evidence('hold'),resource_commit_ref:evidence('commit'),resolution_ref:evidence('resolution'),
+           resource_evidence_refs:[evidence('release')],status:'released'};
+          const unresolved={...resource,record_ref:submission.terminal.record_ref,state_ref:submission.terminal.state_ref,
+           resource_commit_ref:null,resolution_ref:null,resource_evidence_refs:[],status:'unresolved'};
+          resourceReply=()=>({adjudication:savedAdjudication,terminal:submission.terminal,resource:unresolved});
+          assert.deepEqual(await preflight(),readPreflight('unconfirmed','unresolved',unresolved));
+          resourceReply=()=>({adjudication:savedAdjudication,terminal:submission.terminal,resource});
+          assert.deepEqual(await preflight(),readPreflight('verified','released',resource));
+          observeProtectionReply=report('indeterminate');
+          const blocked=readPreflight('verified','released',resource);
+          blocked.body.result.current_protection={state:'unconfirmed',targets:[{target_scope:target,state:'indeterminate'}]};
+          blocked.body.result.recovery_evidence_state='unconfirmed';
+          assert.deepEqual(await preflight(),blocked);
+          assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,submission.terminal);
+         }
+         reads=1;
          observeProtectionReply=report('indeterminate');
          assert.deepEqual(await liveRead(),view('indeterminate'));
          observeProtectionReply=report('verified',{...applied,receipt_id:id()});
@@ -1165,6 +1206,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          principalKind='service';
          assert.deepEqual(await httpsRead(request),{status:403,body:{error:'PERMISSION_DENIED'}});
          assert.deepEqual(await liveRead(),{status:403,body:{error:'PERMISSION_DENIED'}});
+         assert.deepEqual(await preflight(),{status:403,body:{error:'PERMISSION_DENIED'}});
          assert.equal(reads,4);
         }finally{principalKind='human';await app.close();}
         assert.equal(runs.get(null,run.run_id).active_execution_id,executionId);

@@ -30,7 +30,7 @@ const utc=value=>{
  return BigInt(millis)*1000000n;
 };
 
-export function automationRunStore({db,service,bootId,isOpen,authority,publications,schedules=null,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,observeApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult}){
+export function automationRunStore({db,service,bootId,isOpen,authority,publications,schedules=null,armAdmissionPolicy,eventAgePolicy=null,publicationBindingsCurrentInTransaction,publicationBindingRevocationInTransaction,resolveAutomationSourcesInTransaction,prepareSourceTransport,resolveDeviceActionsInTransaction,prepareRunActionObservations,prepareServiceApproval,authorizeControllerPeerInTransaction,prepareEndorsement,currentPairingInTransaction,sendApprovalProtection,observeApprovalProtection,readRevokedEndorsement,authorizeEndorsementSender,sendArmPreparation,lookupArmPreparation,observeArmPreparation,submitAutomationCommand,lookupAutomationCommand,readAutomationCommandResult,readAutomationCommandResource}){
  const scope=Object.freeze({authority_service_id:service.service_id,database_instance_id:service.database_instance_id});
  const writer=work=>{
   need(isOpen()&&db.open&&!db.inTransaction&&Number(service.schema_revision)>=5,'run_unavailable');
@@ -1272,7 +1272,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    return {body:structuredClone(captured.body),beforeSend};
   }finally{pendingPlans--;}
  }
- function recoveryEvidenceInTransaction(authentication,runId,executionId){
+ function recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources=false){
   const original=proposalRun(runId),proof=authorize(authentication,'getRun',original.definition_id,null);
   need(proof.actor.principal_kind==='human','local_authorization_human');
   const run=currentRun(original);
@@ -1283,10 +1283,16 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    'run_recovery_execution_conflict');
   const approval_ref=registered.operation.approval_ref;
   const protection=approvals.recoveryProtectionInTransaction(run,approval_ref,run.arm_generation);
+  const commands=[];
   const steps=value.steps.flatMap(({plan,submission})=>{
    if(plan.payload.kind!=='action')return [];
    const {controller_scope,device_action}=plan.payload.binding.target;
    const terminal=submission?.terminal;
+   if(includeResources){
+    let paired=false;
+    if(submission?.attempt)try{paired=Boolean(currentPairingInTransaction(submission.body.pairing_ref));}catch{}
+    commands.push({step_id:plan.step_id,controller_scope,device_id:device_action.device_id,submission,paired});
+   }
    return [{step_id:plan.step_id,controller_scope,device_id:device_action.device_id,submission_digest:submission?.digest??null,
     submission_state:submission?.state??'not_recorded',command_ref:submission?.adjudication?.command_ref??null,
     terminal:terminal?{state_ref:terminal.state_ref,outcome:terminal.state.outcome,resource_status:terminal.state.resource_status,
@@ -1294,12 +1300,24 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   });
   need(same(proof,authorize(authentication,'getRun',run.definition_id,null)),'run_authorization_changed');
   return {proof,evidence:{run_id:runId,run_revision:run.revision,execution_ref:value.execution_ref,arm_generation:run.arm_generation,
-   pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps}};
+   pause_latches:run.pause_latches,approval_ref,observed_protection:protection,steps},...(includeResources&&{commands})};
  }
- async function observeRecoveryProtection(authentication,runId,executionId){
+ function recoveryCommandResource(command,reply){
+  const {step_id,controller_scope,device_id,submission}=command;
+  const step={step_id,controller_scope,device_id,resource:null};
+  if(!submission?.attempt)return {...step,state:'not_submitted'};
+  if(!reply)return {...step,state:'unavailable'};
+  const {adjudication,terminal,resource}=reply;
+  if(!adjudication||!same(adjudication.identity,submission.body.identity)||
+   submission.adjudication&&!same(adjudication,submission.adjudication)||submission.terminal&&!same(terminal,submission.terminal))
+   return {...step,state:'unconfirmed'};
+  if(adjudication.decision==='rejected')return {...step,state:'rejected',adjudication_ref:adjudication.commit_ref};
+  return resource?{...step,state:resource.status,resource}:{...step,state:'unconfirmed'};
+ }
+ async function observeRecoveryProtection(authentication,runId,executionId,includeResources=false){
   checked('LifecycleId',runId);checked('LifecycleId',executionId);
   function capture(){
-   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId),protection=snapshot.evidence.observed_protection;
+   const snapshot=recoveryEvidenceInTransaction(authentication,runId,executionId,includeResources),protection=snapshot.evidence.observed_protection;
    const requests=protection?.targets.map(({target_scope})=>approvals.prepareRecoveryProtectionInTransaction(protection.operation_ref,target_scope))??[];
    return {...snapshot,requests};
   }
@@ -1309,12 +1327,18 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    need(same(now.domain,start.domain)&&now.tick>=start.tick&&now.tick<start.tick+preflightWindowNs&&
     now.tick<start.validBeforeTick,'run_recovery_protection_expired');
   }
-  const replies=await inBatches(initial.requests,async({notice,pairing_ref})=>{
+  const observe=async(read,pairingRef,request)=>{
    writer(recheckTime);
-   if(!pairing_ref)return null;
-   try{return await observeApprovalProtection(pairing_ref.id,structuredClone(notice));}
+   if(!pairingRef)return null;
+   try{return await read(pairingRef.id,structuredClone(request));}
    catch{return null;}
-  });
+  };
+  const reads=initial.requests.map(({notice,pairing_ref})=>()=>observe(observeApprovalProtection,pairing_ref,notice));
+  for(const command of initial.commands??[]){
+   const body=command.submission?.body;
+   reads.push(()=>observe(readAutomationCommandResource,command.paired?body.pairing_ref:null,body?.request));
+  }
+  const replies=await inBatches(reads,read=>read());
   return writer(()=>{
    const current=capture();
    need(same(initial,current),'run_recovery_execution_conflict');recheckTime();
@@ -1326,7 +1350,15 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
     const state=reply.state==='verified'&&!matched?'unconfirmed':reply.state;
     return {target_scope,state};
    });
-   return {...current.evidence,current_protection:{state:targets.length>0&&targets.every(item=>item.state==='verified')?'verified':'unconfirmed',targets}};
+   const protectionVerified=targets.length>0&&targets.every(item=>item.state==='verified');
+   const result={...current.evidence,current_protection:{state:protectionVerified?'verified':'unconfirmed',targets}};
+   if(!includeResources)return result;
+   const steps=current.commands.map((command,index)=>recoveryCommandResource(command,replies[targets.length+index]));
+   const protectionTargets=current.evidence.observed_protection?.targets??[];
+   const resourcesVerified=steps.every(step=>['not_submitted','rejected','never_acquired','released'].includes(step.state));
+   const allCovered=steps.every(step=>protectionTargets.some(target=>same(target.target_scope,step.controller_scope)&&target.device_ids?.includes(step.device_id)));
+   return {...result,current_resources:{state:resourcesVerified?'verified':'unconfirmed',steps},
+    recovery_evidence_state:protectionVerified&&resourcesVerified&&allCovered?'verified':'unconfirmed'};
   });
  }
  return Object.freeze({
@@ -1425,7 +1457,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   ...(executionCommits&&{inspectRecoveryEvidence(authentication,runId,executionId){
    checked('LifecycleId',runId);checked('LifecycleId',executionId);
    return writer(()=>recoveryEvidenceInTransaction(authentication,runId,executionId).evidence);
-  },observeRecoveryProtection}),
+  },observeRecoveryProtection:(authentication,runId,executionId)=>observeRecoveryProtection(authentication,runId,executionId),
+  preflightRecovery:(authentication,runId,executionId)=>observeRecoveryProtection(authentication,runId,executionId,true)}),
   ...(submissions&&{startSubmissionRecovery,async reconcileAutomationSubmission(authentication,executionId,stepId){
    const slot=submissionSlot(executionId,stepId);
    need(!submitting.has(slot),'execution_submission_in_flight');

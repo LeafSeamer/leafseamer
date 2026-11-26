@@ -212,7 +212,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    eligibility:peerTransport.prepareRunPreparationEligibility});
   if(storage.runs?.reconcileAutomationSubmission&&peerTransport.submitAutomationCommand){
    storage.bindAutomationCommandTransport({submit:peerTransport.submitAutomationCommand,lookup:peerTransport.lookupAutomationCommand,
-    result:peerTransport.readAutomationCommandResult});
+    result:peerTransport.readAutomationCommandResult,resource:peerTransport.readAutomationCommandResource});
   }
   management??=authorization.pairingManagement;
   if(Number(storage.identity.schema_revision)>=6){

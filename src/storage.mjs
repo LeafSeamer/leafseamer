@@ -303,6 +303,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
     submitAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.submit(...args);},
     lookupAutomationCommand(...args){need(!closed&&commandTransport,'execution_submission_transport_unavailable');return commandTransport.lookup(...args);},
     readAutomationCommandResult(...args){need(!closed&&commandTransport?.result,'execution_command_terminal_transport_unavailable');return commandTransport.result(...args);},
+    readAutomationCommandResource(...args){need(!closed&&commandTransport?.resource,'execution_command_resource_transport_unavailable');return commandTransport.resource(...args);},
     currentPairingInTransaction(reference){need(!closed&&pairings,'run_approval_pairing');return pairings.requireActivatedInTransaction(reference);},
     authorizeControllerPeerInTransaction(bindingId,socket){need(!closed&&pairings,'run_peer_unavailable');return pairings.authorizeRunRecordInTransaction(bindingId,socket);}
    }):null,
@@ -319,11 +320,12 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
      [submit,lookup,eligibility].every(method=>typeof method==='function'),'run_preparation_transport_unavailable');
     preparationTransport=Object.freeze({submit,lookup,eligibility});
    },
-   bindAutomationCommandTransport({submit,lookup,result}){
+   bindAutomationCommandTransport({submit,lookup,result,resource=null}){
     need(!closed&&Number(value.schema_revision)>=29&&pairings&&boundAuthority&&!commandTransport&&
      [submit,lookup].every(method=>typeof method==='function')&&
-     (Number(value.schema_revision)<30||typeof result==='function'),'execution_submission_transport_unavailable');
-    commandTransport=Object.freeze({submit,lookup,result});
+     (Number(value.schema_revision)<30||typeof result==='function')&&
+     (resource===null||typeof resource==='function'),'execution_submission_transport_unavailable');
+    commandTransport=Object.freeze({submit,lookup,result,resource});
     storage.runs.startSubmissionRecovery();
    },
    bindBindingApprovals({receiver,eventReceiver=null}){need(!closed&&boundAuthority&&pairings,'binding_approval_dependencies');bindingApprovals=bindingApprovalStore({db,service:value,isOpen:()=>!closed,authority:boundAuthority,receiver,eventReceiver,pairings});return bindingApprovals;},

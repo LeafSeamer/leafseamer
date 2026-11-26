@@ -188,7 +188,8 @@ async function initialize(input,native=null){
    publicationPolicyFactory,...(native?{supervisedReference:native.supervision,referenceSamplingAuthority:native.samplingAuthority}:
     receiverReference&&{referenceTimeProvider:receiverReferenceFixture}),
    publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,
-    localRunApprovals:runTargets,localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,
+    localRunApprovals:runTargets||input.scheduledAdmission===true,
+    localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,
     onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
    const descriptor_digest=digest({scope,provider:'test Seamer process domain'});
    const clock_domain_id=eventApprovals?'clock_'+descriptor_digest.slice(7):id();

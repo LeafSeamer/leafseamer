@@ -33,6 +33,7 @@ const runApprovalRequests=new Map([
  ['inspect-operation',['operation_id']],
  ['inspect-recovery-evidence',['run_id','execution_id']],
  ['observe-recovery-protection',['run_id','execution_id']],
+ ['preflight-recovery',['run_id','execution_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -155,6 +156,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'inspect-operation':return runs.getApprovalOperation(handle,request.operation_id);
    case 'inspect-recovery-evidence':return runs.inspectRecoveryEvidence(handle,request.run_id,request.execution_id);
    case 'observe-recovery-protection':return runs.observeRecoveryProtection(handle,request.run_id,request.execution_id);
+   case 'preflight-recovery':return runs.preflightRecovery(handle,request.run_id,request.execution_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -223,7 +225,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    if(req.url===runApprovalPath&&(armOperations.has(body.operation)&&!localRunArm||
     revocationOperations.has(body.operation)&&!runs.revokeApproval||
     body.operation==='inspect-recovery-evidence'&&!runs.inspectRecoveryEvidence||
-    body.operation==='observe-recovery-protection'&&!runs.observeRecoveryProtection)){empty(res,404);return;}
+    body.operation==='observe-recovery-protection'&&!runs.observeRecoveryProtection||
+    body.operation==='preflight-recovery'&&!runs.preflightRecovery)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

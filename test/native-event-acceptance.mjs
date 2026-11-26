@@ -122,6 +122,18 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
   if(withdrawReference){
    assert.equal(finished.lifecycle,'paused');
    assert.equal(finished.active_execution_id,admission.execution_id);
+   const body=Buffer.from(canonical({operation:'preflight-recovery',request:{run_id:armed.run_id,execution_id:admission.execution_id}}));
+   const response=await requestHttps(origin,ca,{target:'/auth/local-run-approvals/v1',method:'POST',body,
+    headers:[bearer,['content-type','application/json'],['content-length',String(body.length)]]});
+   assert.equal(response.status,'200',response.body.toString());
+   const {result}=JSON.parse(response.body);
+   assert.equal(result.current_protection.state,'unconfirmed');
+   assert.equal(result.current_resources.state,'verified');
+   assert.equal(result.recovery_evidence_state,'unconfirmed');
+   assert.equal(result.current_resources.steps.length,1);
+   assert.equal(result.current_resources.steps[0].state,'released');
+   assert.deepEqual(result.current_resources.steps[0].resource,resource);
+   assert.equal(result.steps[0].terminal.outcome,'blocked');
   }else{
    assert.equal(finished.lifecycle,'armed');
    assert.equal(finished.active_execution_id,null);
