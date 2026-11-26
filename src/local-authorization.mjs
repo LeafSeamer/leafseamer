@@ -56,7 +56,7 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   need(v.service_id===service.service_id&&v.service_boot_id===bootId&&v.clock_domain_id===sample.runtime_domain_ref.clock_domain_id&&v.descriptor_digest===sample.runtime_domain_ref.descriptor_digest,'clock');
   const lower=clockInteger(sample.lower_ns),upper=clockInteger(sample.upper_ns);need(lower<=upper,'clock');
   return {lower,upper,tick:clockInteger(sample.tick_ns),domain:sample.runtime_domain_ref,acquisition_ref:sample.acquisition_ref,
-   validBeforeTick:clockInteger(sample.valid_before_tick_ns)};
+   validBeforeTick:clockInteger(sample.valid_before_tick_ns),drift_ppb:v.drift_ppb,monotonic_quantization_ns:v.monotonic_quantization_ns};
  }
  function identity(handle,revocationScope=null){inside();const value=receiver.currentInTransaction(handle,revocationScope),s=value.snapshot;
   need(value.issuer_service_id===fixed.service_id&&s.issuer_id===fixed.issuer_id&&s.issuer_epoch===fixed.issuer_epoch&&s.audience===service.service_id&&s.state==='active','identity');

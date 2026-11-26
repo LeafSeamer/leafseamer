@@ -8,6 +8,14 @@ const need=(ok,code)=>{if(!ok)throw Object.assign(new Error(code),{code});};
 const reference=(kind,scope,id,hash)=>({kind,scope,object_id:id,revision:'1',digest:hash});
 const originReference=execution=>execution.admission_ref??execution.decision_ref;
 
+export function executionDelayBounds(anchor,payload){
+ const anchorTick=clockInteger(anchor);
+ const due=clockInteger(String(anchorTick+BigInt(payload.delay_ms)*1000000n));
+ const deadline=clockInteger(String(due+BigInt(payload.max_lateness_ms)*1000000n));
+ return {anchor_tick_ns:String(anchorTick),due_tick_ns:String(due),deadline_tick_ns:String(deadline)};
+}
+export const inDelayWindow=({body},tick)=>tick>=clockInteger(body.due_tick_ns)&&tick<clockInteger(body.deadline_tick_ns);
+
 export function selectedExecutionSteps(compiled,run,selected){
  const {program}=compiled.compiled;
  let groups;
@@ -191,14 +199,11 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
  }
  function timeWindow(value,step,ready){
   const {execution_ref,anchor}=value,{step_id,payload}=step.plan;
-  const anchorTick=clockInteger(anchor.body.clock.tick_ns);
-  const due=clockInteger(String(anchorTick+BigInt(payload.delay_ms)*1000000n));
-  const deadline=clockInteger(String(due+BigInt(payload.max_lateness_ms)*1000000n));
   return {format:'leafseamer.delay-window/1',execution_ref,step_id,step_ready_ref:ready.ref,
-   execution_anchor_ref:anchor.ref,clock_domain_ref:anchor.body.clock.runtime_domain_ref,anchor_tick_ns:String(anchorTick),
-   due_tick_ns:String(due),deadline_tick_ns:String(deadline),window_scope:'direct_successor',anchor:payload.anchor};
+   execution_anchor_ref:anchor.ref,clock_domain_ref:anchor.body.clock.runtime_domain_ref,
+   ...executionDelayBounds(anchor.body.clock.tick_ns,payload),window_scope:'direct_successor',anchor:payload.anchor};
  }
- const inWindow=(window,tick)=>tick>=clockInteger(window.body.due_tick_ns)&&tick<clockInteger(window.body.deadline_tick_ns);
+ const inWindow=inDelayWindow;
  function dependencyEvidence(plan,byStep,tick,{historical=false}={}){
   const windows=new Map(),terminals=new Map();
   for(const {from_step_id,edge_kind} of plan.dependencies){

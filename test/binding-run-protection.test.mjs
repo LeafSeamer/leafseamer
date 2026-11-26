@@ -11,7 +11,7 @@ import {once} from 'node:events';
 import {createInterface} from 'node:readline';
 import canonical from 'canonicalize';
 import Database from 'better-sqlite3';
-import {boolean,delay as delayStep,digest,input,reference} from './automation-program-fixture.mjs';
+import {boolean,delay as delayStep,digest,input,reference,step as actionFixture} from './automation-program-fixture.mjs';
 import {inspect,setup} from './automation-publication-fixture.mjs';
 import {fixture as clockFixture} from './auth-clock-fixture.mjs';
 import {peerCertificates} from '../../leafseamer-controller/test/fixtures/peer-certificates.mjs';
@@ -397,13 +397,16 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['人员恢复预览固定当前命令核销并保留历史未知终态','40',null,'validated','terminal_reconciled'],
  ['人员恢复原子消费预览并一次性记录新执行开始','44',null,'validated','recovery_reserved'],
  ['人员恢复执行提供真实配对动作并按原命令查回丢失响应','45',null,'validated','recovery_dispatch'],
+ ['恢复延时在原窗口释放直接后继','46',null,'validated','recovery_delay'],
+ ['恢复延时达到截止时保护且不提交后继','46',null,'validated','recovery_delay_late'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
 ])test('布防受理、回执采用和最终提交保留同一操作：'+label,async t=>{
  const registration=eventRegistration(),hasTarget=schema_revision!=='16',executionPlanning=Number(schema_revision)>=25;
  const withTerminals=Number(schema_revision)>=30;
- const dispatchRecovery=commandCase==='recovery_dispatch',recoveryReserved=dispatchRecovery||commandCase==='recovery_reserved';
+ const delayRecovery=commandCase?.startsWith('recovery_delay'),lateRecoveryDelay=commandCase==='recovery_delay_late';
+ const dispatchRecovery=delayRecovery||commandCase==='recovery_dispatch',recoveryReserved=dispatchRecovery||commandCase==='recovery_reserved';
  const r5=commandCase?.startsWith('r5_'),r5Rollback=commandCase==='r5_rollback',r5MissingRelease=commandCase==='r5_missing_release';
  const r5Optional=commandCase==='r5_optional'||r5MissingRelease;
  const r5GrantRevoked=commandCase==='r5_grant_revoked',r5Protected=r5Rollback||r5GrantRevoked;
@@ -423,7 +426,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   ...(parameterCase&&{actionParameters:{...(r5Optional&&{required:false,failure_policy:'continue_if_independent'}),parameter_bindings:[{target_pointer:'/value',
    value:scheduleCase?{kind:'literal',value:true}:parameterCase==='unknown'?{...reference(),pointer:'/request_observation'}:reference()}],
    ...(parameterCase==='guard'&&{guard:{kind:'literal',value:false}})}}),
-  ...(executionPlanning&&{extraSteps:[delayStep('after-action')]})}:null;
+  ...(executionPlanning&&{extraSteps:delayRecovery?[{...delayStep('after-action'),delay_ms:20,max_lateness_ms:100},
+   {...actionFixture('after-wait'),parameter_bindings:[{target_pointer:'/value',value:reference()}]}]:[delayStep('after-action')]})}:null;
  const f=setup(t,{revision:schema_revision,withoutActions:!hasTarget,triggerBinding:{...triggerBinding,projections},triggerReview}),{scope,draft}=f,contextId=id(),bootId=f.store.serviceBootId;
  const actor={issuer_id:id(),issuer_epoch:id(),principal_id:id(),principal_kind:'human'},authEvidence={origin:'fixture-authentication'};
  f.store.close();
@@ -462,7 +466,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   const domain={clock_domain_id:id()};
   let expireOnRecoveryBinding=false;
   const wallTime=()=>({tick:expireOnCompletionWrite&&db.prepare('SELECT 1 FROM automation_arm_completion').pluck().get()?tick+2000000000n:tick,
-   domain,validBeforeTick,acquisition_ref:proof,lower:epoch,upper:(
+   domain,validBeforeTick,acquisition_ref:proof,lower:epoch,drift_ppb:100000,monotonic_quantization_ns:'10',upper:(
     expireOnPlanWrite&&db.prepare('SELECT 1 FROM automation_execution_seal').pluck().get()||
     expireOnRecoveryBinding&&db.prepare('SELECT 1 FROM automation_recovery_execution_binding').pluck().get())?epoch+250000000n:epoch});
   const proof={id:id(),revision:'1',digest:digest('reviewed test profile')};
@@ -470,7 +474,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   authEvidence.grant_ref=proof;
   authEvidence.credential={issuer_service_id:target?.authority_service_id??id(),token_id:id(),session_id:id(),session_revision:'1',credential_id:id(),
    policy_revision:'1',scope_digest:digest('issuer scope'),recent_before_ns:pairing.expires_ns};
-  const counts={rows:'40',logical_bytes:scheduledRuntime?'56000':commandCase?'48000':delayCase||parameterCase?'26000':executionPlanning?'12000':'8000',queue_slots:'1',work_units:'60'};
+  const counts={rows:'40',logical_bytes:delayRecovery?'80000':scheduledRuntime?'56000':commandCase?'48000':delayCase||parameterCase?'26000':executionPlanning?'12000':'8000',
+   queue_slots:'1',work_units:'60'};
   const source={state:'synchronized',source:{baseline_ref:{apply_id:id()},continuity:{connection_generation:'1',delivery_cursor:'2'}}};
   const settings={approval_file:path.join(f.dir,'publication-approval.json')};
   const installationApproval={format:'leafseamer.publication-policy-approval/2',policy_ref:f.content.policy_ref,not_before_ns:'0',expires_ns:'18446744073709551615',...limits};
@@ -488,6 +493,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
   let recoverySubmission=null,recoveryLookupCalls=0,recoveryRemoteReceipt=null,recoveryPeerFailure=null;
   let approvalEndorsementForRecovery=null;
   let recoveryCommand=null,recoveryAdjudication=null,recoveryCommandSocket=null,recoveryCommandCalls=0,recoveryCommandReads=0;
+  const delayCommands=new Map();
+  let triggerOriginal=null,returnRecoveryTerminal=false,afterWaitEvidence=null;
   let recoveryGrantCurrent=true,recoveryGrantReads=0,loseRecoveryQualification=false;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
@@ -513,6 +520,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    sendRecoveryPreparation(...args){return seamerTransport.submitRecoveryPreparation(...args);},
    lookupRecoveryPreparation(...args){return seamerTransport.lookupRecoveryPreparation(...args);},
    observeRecoveryPreparation(...args){return seamerTransport.prepareRecoveryPreparationEligibility(...args);},
+   readRecoveryDispatchOrigin(cursor){assert.deepEqual(cursor,triggerOriginal.receive_cursor);return triggerOriginal;},
    submitAutomationCommand(...args){return seamerTransport.submitAutomationCommand(...args);},
    lookupAutomationCommand(...args){return seamerTransport.lookupAutomationCommand(...args);},
    readAutomationCommandResult(...args){return seamerTransport.readAutomationCommandResult(...args);},
@@ -640,7 +648,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      if(request.action.execution_ref.revision==='2'){
       try{
        assert.equal(dispatchRecovery,true);
-       assert.equal(++recoveryCommandCalls,1);
+       const followUp=delayRecovery&&request.action.step_id==='after-wait';
+       assert.equal(++recoveryCommandCalls,followUp?2:1);
        recoveryCommand=request;
        recoveryCommandSocket=socket;
        assert.equal(runs.get(null,recoverySubmission.run_id).lifecycle,'running');
@@ -649,7 +658,10 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
        assert.deepEqual(JSON.parse(row).request,request);
        const published=await observeActionBinding(request.action);
        assert.equal(published.original.execution.origin_kind,'recovery');
-       assert.equal(published.original.recovery.source_parameters.body.parameters.value,true);
+       if(followUp){
+        assert.equal(published.original.recovery.source_parameters,null);
+        afterWaitEvidence=published.original;
+       }else assert.equal(published.original.recovery.source_parameters.body.parameters.value,true);
        if(controllerActions){
         const normalized=controllerActions.actionAdmissionRequest(request.action,target);
         const adopted=controllerActions.actionAdmissionBinding(published.original,normalized,recoveryRemoteReceipt,bp.binding_id);
@@ -660,7 +672,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         identity:automationCommandIdentity(request,recoveryRemoteReceipt.applied_receipt.grant.principal),
         command_ref:ref('command',target,id(),digest('queued recovery action')),commit_ref:ref('controller_commit',target,id(),digest('recovery action adjudication'))};
        recoveryAdjudication={...body,adjudication_digest:digest(body)};
-       socket.destroy();
+       if(delayRecovery)delayCommands.set(request.action.step_id,{request,adjudication:recoveryAdjudication});
+       else socket.destroy();
        return {created:true,adjudication:recoveryAdjudication};
       }catch(error){recoveryPeerFailure=error;throw error;}
      }
@@ -697,6 +710,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      return {created:true,adjudication:submittedAdjudication};
     },lookup(_binding,socket,request){
      if(request.action.execution_ref.revision==='2'){
+      if(delayRecovery){
+       const value=delayCommands.get(request.action.step_id);
+       assert.deepEqual(value.request,request);
+       return {state:'found',adjudication:value.adjudication};
+      }
       assert.deepEqual(request,recoveryCommand);
       if(socket!==recoveryCommandSocket&&!queriedSockets.has(socket)){queriedSockets.add(socket);recoveryCommandReads++;}
       return recoveryAdjudication?{state:'found',adjudication:recoveryAdjudication}:{state:'not_found',adjudication:null};
@@ -707,6 +725,18 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      return commandFound?{state:'found',adjudication:savedAdjudication}:{state:'not_found',adjudication:null};
     },result(_binding,socket,request){
      assert.equal(socket.authorized,true);
+     if(delayRecovery&&request.action.execution_ref.revision==='2'){
+      const value=delayCommands.get(request.action.step_id);
+      assert.deepEqual(value.request,request);
+      const {adjudication}=value,command_ref=adjudication.command_ref;
+      const record=kind=>({id:command_ref.object_id+'.'+kind,revision:'1',digest:digest(kind)});
+      const state={command_id:command_ref.object_id,scope:target,revision:'2',phase:'finished',outcome:'succeeded',effect_status:'verified',
+       resource_status:'clear',automation_continuation:'eligible',reason_code:null,terminal_revision:'2',resolution_ref:null,attempt_ids:[command_ref.object_id],
+       completion_evidence_refs:[record('completed')],resource_evidence_refs:[record('released')]};
+      const terminal={format:'leafseamer.automation-command-terminal/1',command_ref,state,record_ref:{...command_ref,revision:'2',digest:digest(state)},
+       state_ref:{id:command_ref.object_id+'_state_2',revision:'2',digest:digest(state)},completion_achieved:'effect_verified'};
+      return {adjudication,terminal:returnRecoveryTerminal?terminal:null};
+     }
      assert.deepEqual(request,sentCommand);terminalReads++;
      return {adjudication:savedAdjudication,terminal:terminalReply};
     },resource(_binding,socket,request){
@@ -951,6 +981,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      if(omitReady)db.exec('CREATE TEMP TRIGGER test_omit_ready BEFORE INSERT ON automation_execution_step_ready BEGIN SELECT RAISE(IGNORE); END');
      const deferProjection=label==='等待当前触发事件的来源投影后才封存动作参数';
      const accepted=await verified.live('4',{value:true},0n,deferProjection),decision=result(accepted);
+     triggerOriginal=accepted;
      if(omitReady)db.exec('DROP TRIGGER test_omit_ready');
      assert.equal(decision.disposition,'accepted');assert.equal(decision.evaluation.selected_branch,stateMachine?'start':'rule');
      originalExecution=runs.getExecution(null,decision.execution_id);
@@ -966,9 +997,11 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
      assert.equal(originalExecution.execution.decision_ref.object_id,decision.decision_id);
      assert.deepEqual(originalExecution.execution.receive_cursor,accepted.receive_cursor);
      assert.deepEqual(originalExecution.execution.grant_basis.map(value=>value.grant_ref),[ready.completion.evidence.targets[0].request.grant_ref]);
-     const originalSteps=originalExecution.steps,actionStep=originalSteps.at(-2),waitingDelay=originalSteps.at(-1);
+     const originalSteps=originalExecution.steps,actionStep=originalSteps.find(({plan})=>plan.step_id==='first'),
+      waitingDelay=originalSteps.find(({plan})=>plan.step_id==='after-action');
      assert.deepEqual(originalSteps.map(({plan,state})=>[plan.step_id,plan.payload.kind,state.state]),[
-      ...(delayCase?[['before-a','delay','waiting'],['before-b','delay','waiting']]:[]),['first','action','waiting'],['after-action','delay','waiting']]);
+      ...(delayCase?[['before-a','delay','waiting'],['before-b','delay','waiting']]:[]),['first','action','waiting'],['after-action','delay','waiting'],
+      ...(delayRecovery?[['after-wait','action','waiting']]:[])]);
      assert.equal(actionStep.plan.payload.binding.grant_ref.digest,originalExecution.execution.grant_basis[0].grant_ref.digest);
      assert.deepEqual(waitingDelay.plan.dependencies,[{from_step_id:'first',to_step_id:'after-action',edge_kind:'sequence'}]);
      if(withAnchors){
@@ -1196,7 +1229,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         assert.deepEqual(initial.steps,[{step_id:'first',controller_scope:target,device_id:action.device_id,
          submission_digest:submission.digest,submission_state:'accepted',command_ref:submission.adjudication.command_ref,
          terminal:{state_ref:submission.terminal.state_ref,outcome:r5MissingRelease?'failed':recoveryReserved?'blocked':'unknown',
-          resource_status:r5MissingRelease||recoveryReserved?'clear':'unresolved',resource_evidence_refs:submission.terminal.state.resource_evidence_refs}}]);
+          resource_status:r5MissingRelease||recoveryReserved?'clear':'unresolved',resource_evidence_refs:submission.terminal.state.resource_evidence_refs}},
+         ...(delayRecovery?[{step_id:'after-wait',controller_scope:target,device_id:action.device_id,submission_digest:null,
+          submission_state:'not_recorded',command_ref:null,terminal:null}]:[])]);
         assert.deepEqual(initial.execution_ref,originalExecution.execution_ref);
         const revoked=runs.revokeApproval(null,saved.operation.approval_ref.object_id,{context:{context_id:contextId,idempotency_key:id()},
          approval_ref:saved.operation.approval_ref,expected_status_revision:'1',reason:'核对旧执行'});
@@ -1248,7 +1283,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
          const readPreflight=(state,stepState,resource=null)=>{
           const value=view('verified','verified');
           value.body.result.current_resources={state,steps:[{step_id:'first',controller_scope:target,device_id:action.device_id,
-           state:stepState,resource}]};
+           state:stepState,resource},...(delayRecovery?[{step_id:'after-wait',controller_scope:target,device_id:action.device_id,state:'not_submitted',resource:null}]:[])]};
           value.body.result.recovery_evidence_state=state;
           return value;
          };
@@ -1475,10 +1510,63 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.equal(start.run_revision,'9');
           assert.equal(start.dispatch_eligible,false);
           const expectedSteps=previewResult.body.result.preview.plan.items.map(item=>({...item,
-           grant_ref:item.step_id==='first'?recoveryRemoteReceipt.applied_receipt.grant_ref:null}));
+           grant_ref:item.step_id==='after-action'?null:recoveryRemoteReceipt.applied_receipt.grant_ref}));
           assert.deepEqual(start.steps,expectedSteps);
           assert.equal(start.steps[0].decision,'execute_new');
           assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_start').pluck().get(),1);
+          if(delayRecovery){
+           const read=()=>runs.getExecution(null,operation.new_execution_id);
+           const poll=async predicate=>{
+            const expires=performance.now()+6000;
+            do{
+             assert.ifError(recoveryPeerFailure);
+             const current=read();if(predicate(current))return current;
+             await wait(10);
+            }while(performance.now()<expires);
+            const {protection,dispatch}=read();
+            assert.fail(JSON.stringify({protection,commandCalls:recoveryCommandCalls,steps:dispatch.steps.map(step=>({
+             id:step.step_id,submission:step.submission?.state,window:!!step.delay_window,elapsed:!!step.delay_elapsed
+            }))}));
+           };
+           const waitStep=value=>value.dispatch.steps[1];
+           const afterWait=value=>value.dispatch.steps[2];
+           await poll(value=>value.dispatch.steps[0].submission?.state==='accepted');
+           assert.equal(waitStep(read()).delay_window,null);
+           returnRecoveryTerminal=true;
+           const window=waitStep(await poll(value=>waitStep(value).delay_window)).delay_window;
+           const due=BigInt(window.body.due_tick_ns),end=BigInt(window.body.deadline_tick_ns);
+           assert.equal(due,BigInt(start.observed_at.tick_ns)+20000000n);
+           assert.equal(end,due+100000000n);
+           assert.deepEqual(window.body.dependencies.terminals,[{step_id:'first',terminal_digest:digest(read().dispatch.steps[0].submission.terminal)}]);
+           tick=due-1n;
+           await wait(35);
+           assert.equal(recoveryCommandCalls,1);
+           assert.equal(waitStep(read()).delay_elapsed,null);
+           tick=lateRecoveryDelay?end:due;
+           const result=await poll(value=>lateRecoveryDelay?value.protection==='delay_window_expired':afterWait(value).submission?.state==='accepted');
+           assert.deepEqual(waitStep(result).delay_window,window);
+           if(lateRecoveryDelay){
+            assert.equal(recoveryCommandCalls,1);
+            assert.equal(waitStep(result).delay_elapsed,null);
+            assert.equal(afterWait(result).submission,null);
+            assert.equal(runs.get(null,run.run_id).lifecycle,'paused');
+           }else{
+            assert.equal(recoveryCommandCalls,2);
+            assert.equal(waitStep(result).delay_elapsed.body.clock.tick_ns,String(due));
+            assert.deepEqual(afterWaitEvidence.parameters.body.delay_window_refs,[window.ref]);
+            assert.ok(BigInt(afterWaitEvidence.eligible_before_ns)<epoch+(end-due));
+            assert.deepEqual(await startExecution(),starts[0]);
+            assert.equal(recoveryCommandCalls,2);
+           }
+           const restarted=new Database(filename);
+           try{
+            const after=automationRunStore({...assembly,db:restarted,bootId:id(),isOpen:()=>restarted.open});
+            assert.deepEqual(after.getExecution(null,operation.new_execution_id).dispatch,result.dispatch);
+            assert.equal(after.get(null,run.run_id).lifecycle,'paused');
+           }finally{restarted.close();}
+           assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
+           return;
+          }
           if(dispatchRecovery){
            const expires=performance.now()+6000;
            while(performance.now()<expires&&!recoveryPeerFailure){

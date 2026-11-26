@@ -19,7 +19,7 @@ import {automationExecutionCommit,completionEvidence,mayContinueAfterFailure,nex
 import {automationRecoveryPreviewStore,recoveryPlan} from './automation-recovery-preview.mjs';
 import {automationRecoveryOperationStore,recoveryReceipt} from './automation-recovery-operation.mjs';
 import {automationRecoveryPreparationStore} from './automation-recovery-preparation.mjs';
-import {automationRecoveryDispatchStore} from './automation-recovery-dispatch.mjs';
+import {automationRecoveryDispatchStore,recoveryStepEvidence} from './automation-recovery-dispatch.mjs';
 
 const fields=(value,names)=>value&&Object.keys(value).sort().join(',')===names;
 const view=({last_receive_cursor,ingest_revision,dependency_digest,run_arm_completion_ref,arm_source_baselines,trigger_pause_revision,...run})=>({...run,last_receive_seq:last_receive_cursor.receive_sequence});
@@ -157,7 +157,7 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
  const recoveries=Number(service.schema_revision)>=41?automationRecoveryOperationStore({db,scope,previews:recoveryPreviews}):null;
  const recoveryPreparations=Number(service.schema_revision)>=42?
   automationRecoveryPreparationStore(db,{withBinding:Number(service.schema_revision)>=43,withStart:Number(service.schema_revision)>=44}):null;
- const recoveryDispatch=Number(service.schema_revision)>=45?automationRecoveryDispatchStore(db):null;
+ const recoveryDispatch=Number(service.schema_revision)>=45?automationRecoveryDispatchStore(db,{withDelays:Number(service.schema_revision)>=46}):null;
  const submissions=Number(service.schema_revision)>=29?automationSubmissionStore(db,{withTerminals:Number(service.schema_revision)>=30}):null;
  const executions=Number(service.schema_revision)>=25?automationExecutionStore(db,scope,bootId,{withAnchors:withExecutionAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions,schedules,withScheduledRuntime}):null;
  const activeSlotRevision=withRunCommit&&db.prepare(`SELECT json_extract(e.body_jcs,'$.activation_slot_revision') FROM automation_execution_head h
@@ -1872,37 +1872,44 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   need(same(now.domain,observed_at.domain)&&now.tick>=BigInt(observed_at.tick_ns)&&now.tick<now.validBeforeTick&&
    now.upper<BigInt(eligible_before_ns),'run_recovery_dispatch_expired');
   return {tick_ns:String(now.tick),upper_ns:String(now.upper),valid_before_tick_ns:String(now.validBeforeTick),
-   runtime_domain_ref:now.domain,acquisition_ref:now.acquisition_ref};
+   runtime_domain_ref:now.domain,acquisition_ref:now.acquisition_ref,lower_ns:String(now.lower),
+   ...(now.drift_ppb!==undefined&&{drift_ppb:now.drift_ppb,monotonic_quantization_ns:now.monotonic_quantization_ns})};
  }
  const recoveryDispatchClock=value=>recoveryStartClock(value.started.start);
- function recoveryDependencies(value,step){
-  const evidence=[];
-  for(const {from_step_id} of step.plan.dependencies){
-   const predecessor=value.steps.find(item=>item.plan.step_id===from_step_id);
-   if(predecessor?.item.decision==='retain_success'){
-    evidence.push({step_id:from_step_id,completion_evidence_refs:predecessor.item.completion_evidence_refs});
-    continue;
-   }
-   const terminal=predecessor?.submission?.terminal;
-   if(terminal?.state.outcome!=='succeeded')return null;
-   evidence.push({step_id:from_step_id,terminal_digest:digest(terminal)});
-  }
-  return evidence;
+ function assertRecoveryDispatchBasis(value,snapshot,transports){
+  const {recovery,started}=value,{run,approval}=recoveryPreparationState(recovery),dependencies=readDependencies(run);
+  need(run.lifecycle==='running'&&run.revision===started.start.run_revision&&same(approval.approval_ref,started.start.approval_ref)&&
+   same(run.business_state,snapshot.business_state)&&digest(run.pause_latches)===snapshot.latch_set_digest&&dependencies.digest===snapshot.dependency_digest&&
+   same(resolveAutomationSourcesInTransaction(dependencies.body.dependencies.inputs),snapshot.sources.map(({transport,...item})=>item)),
+   'run_recovery_dispatch_changed');
+  assertArmSourceTransports(snapshot.sources,transports);
  }
  const runningRecoveryDispatch=new Set();
+ const recoveryDispatchLive=()=>executionScheduling&&isOpen()&&db.open;
  function queueRecoveryDispatch(id){
-  if(!executionScheduling||!isOpen()||!db.open||runningRecoveryDispatch.has(id))return;
+  if(!recoveryDispatchLive()||runningRecoveryDispatch.has(id))return;
   runningRecoveryDispatch.add(id);
   queueMicrotask(async()=>{
-   try{if(executionScheduling&&isOpen()&&db.open)await dispatchRecovery(id);}
-   catch{
-    if(executionScheduling&&isOpen()&&db.open)try{writer(()=>recoveryDispatch.protect(id,'recovery_dispatch_unavailable'));}catch{}
+   let wait=null;
+   try{if(recoveryDispatchLive())wait=await dispatchRecovery(id);}
+   catch(error){
+    const reason=error.code==='delay_window_expired'?error.code:'recovery_dispatch_unavailable';
+    if(recoveryDispatchLive())try{writer(()=>recoveryDispatch.protect(id,reason));}catch{}
    }finally{actionReaders.delete(id);runningRecoveryDispatch.delete(id);}
+   if(wait!=null&&recoveryDispatchLive()){
+    const ms=(wait+999999n)/1000000n;
+    clearTimeout(delayTimers.get(id));
+    delayTimers.set(id,setTimeout(()=>{
+     delayTimers.delete(id);
+     queueRecoveryDispatch(id);
+    },Number(ms<1000n?ms:1000n)).unref());
+   }
   });
  }
  function scheduleRecoveryTerminal(id,stepId){
   const running=()=>executionScheduling&&isOpen()&&db.open;
   if(!running())return;
+  clearTimeout(delayTimers.get(id));
   const timer=setTimeout(async()=>{
    delayTimers.delete(id);
    if(!running()||await readAndAdoptTerminal(id,stepId,running))return;
@@ -1918,47 +1925,69 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   delayTimers.set(id,timer);
  }
  async function dispatchRecovery(id){
-  const running=()=>executionScheduling&&isOpen()&&db.open;
   const initial=writer(()=>{
    const value=readRecoveryDispatch(id);
    if(!value||value.protection||value.execution.service_boot_id!==bootId||
     value.steps.some(step=>step.submission?.attempt&&!step.submission.terminal))return null;
-   const step=value.steps.find(candidate=>candidate.item.grant_ref&&!candidate.submission&&!candidate.ready&&recoveryDependencies(value,candidate));
-   if(!step)return null;
-   return {value,step,clock:recoveryDispatchClock(value)};
+   const pending=value.steps.filter(step=>step.item.decision==='execute_new'&&
+    (step.item.grant_ref?!step.submission&&!step.ready:recoveryDispatch.writeDelay&&step.plan.payload.kind==='delay'&&!step.elapsed));
+   if(!pending.length)return null;
+   const clock=recoveryDispatchClock(value),tick=BigInt(clock.tick_ns);
+   let wait=null;
+   for(const step of pending){
+    const evidence=recoveryStepEvidence(value.steps,step,clock);
+    if(!evidence)continue;
+    if(step.window&&tick<BigInt(step.window.body.due_tick_ns)){
+     const remaining=BigInt(step.window.body.due_tick_ns)-tick;
+     if(wait===null||remaining<wait)wait=remaining;
+     continue;
+    }
+    return {value,step,clock};
+   }
+   return {wait};
   });
   if(!initial)return;
+  if(!initial.step)return initial.wait;
   const {recovery,registration,execution,execution_ref,started}=initial.value,stepId=initial.step.plan.step_id;
   const {snapshot}=writer(()=>recoveryPreviews.read(recovery.operation.preview_ref).preview);
+  if(!initial.step.item.grant_ref)return advanceRecoveryDelay(initial,snapshot);
   const grant=execution.grant_basis.find(member=>same(member.grant_ref,initial.step.item.grant_ref));
   const plan=registration.plans.find(member=>member.request.preparation_id===grant.lookup.preparation_id);
   const request={lookup:grant.lookup,receipt_ref:grant.receipt_ref,grant_ref:grant.grant_ref};
   const bundle=publications.prepareExecutionProgram(snapshot.definition_id,snapshot.definition_version),publication=bundle.publication;
   const {compiled}=publication;
   const [proof,transports]=await Promise.all([observeRecoveryPreparation(grant.pairing_ref.id,structuredClone(request)),readArmSourceTransports(snapshot.sources)]);
-  if(!running())return;
+  if(!recoveryDispatchLive())return;
   const qualified=proof.original;
   need(qualified.state==='eligible'&&same(qualified.request,request),'run_recovery_preparation_ineligible');
-  const deadline=String([execution.approved_before_ns,qualified.eligible_before_ns].map(BigInt).reduce((a,b)=>a<b?a:b));
+  const dependenciesAtStart=recoveryStepEvidence(initial.value.steps,initial.step,initial.clock);
+  const deadlines=[execution.approved_before_ns,qualified.eligible_before_ns].map(BigInt);
+  if(dependenciesAtStart.windows.length){
+   const {lower_ns,tick_ns,valid_before_tick_ns,monotonic_quantization_ns,drift_ppb}=initial.clock;
+   const ns=1000000000n,drift=BigInt(drift_ppb),quantization=BigInt(monotonic_quantization_ns);
+   need(drift>=0n&&drift<=1000000n&&quantization>=0n,'run_recovery_dispatch_expired');
+   for(const ref of dependenciesAtStart.windows){
+    const window=initial.value.steps.find(step=>same(step.window?.ref,ref)).window;
+    const end=[window.body.deadline_tick_ns,valid_before_tick_ns].map(BigInt).reduce((a,b)=>a<b?a:b);
+    const remaining=end-BigInt(tick_ns)-2n*quantization;
+    need(remaining>0n,'delay_window_expired');
+    deadlines.push(BigInt(lower_ns)+remaining*(ns-drift)/ns);
+   }
+  }
+  const deadline=String(deadlines.reduce((a,b)=>a<b?a:b));
   function current(){
    const value=readRecoveryDispatch(id),step=value?.steps.find(candidate=>candidate.plan.step_id===stepId);
-   need(running()&&value&&!value.protection&&same(value.execution_ref,execution_ref)&&step,'run_recovery_dispatch_changed');
-   const {run,approval}=recoveryPreparationState(recovery);
-   const dependencies=readDependencies(run);
-   need(run.lifecycle==='running'&&run.revision===started.start.run_revision&&same(approval.approval_ref,started.start.approval_ref)&&
-    same(run.business_state,snapshot.business_state)&&digest(run.pause_latches)===snapshot.latch_set_digest&&dependencies.digest===snapshot.dependency_digest&&
-    same(resolveAutomationSourcesInTransaction(dependencies.body.dependencies.inputs),snapshot.sources.map(({transport,...item})=>item)),
-    'run_recovery_dispatch_changed');
-   assertArmSourceTransports(snapshot.sources,transports);
+   need(recoveryDispatchLive()&&value&&!value.protection&&same(value.execution_ref,execution_ref)&&step,'run_recovery_dispatch_changed');
+   assertRecoveryDispatchBasis(value,snapshot,transports);
    bundle.assertOriginalInTransaction();
    need(same(publication.result.artifact_ref,execution.artifact_ref)&&proof.assertCurrentInTransaction()===true,'run_recovery_dispatch_changed');
    const pair=armPlanPair(plan),clock=recoveryDispatchClock(value);
    need(same(pairingReference(pair),grant.pairing_ref)&&BigInt(clock.upper_ns)<BigInt(deadline)&&
     BigInt(clock.upper_ns)<BigInt(pair.expires_ns)&&BigInt(clock.tick_ns)>=BigInt(initial.clock.tick_ns)&&
     BigInt(clock.tick_ns)<BigInt(initial.clock.valid_before_tick_ns),'run_recovery_dispatch_expired');
-   const command_terminal_refs=recoveryDependencies(value,step);
-   need(command_terminal_refs!==null,'run_recovery_dispatch_changed');
-   return {value,step,clock,command_terminal_refs,pair};
+   const evidence=recoveryStepEvidence(value.steps,step,clock);
+   need(evidence,'run_recovery_dispatch_changed');
+   return {value,step,clock,evidence,pair};
   }
   const actualGrant=writer(()=>{
    current();return recoveryPreparations.received(plan).original.record.applied_receipt.grant;
@@ -1983,11 +2012,11 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   const action=initial.step.plan.payload.binding;
   need(same(result.parameter_schema_ref,action.parameter_schema_ref)&&digest(result.parameters)===result.parameters_digest,'run_recovery_dispatch_parameters');
   assertRunGrantParameters(actualGrant,action.target.device_action,result.parameters);
-  if(!running())return;
+  if(!recoveryDispatchLive())return;
   const ledger=recoveryDispatch.submissions;
   const recorded=writer(()=>{
-   const {value,step,clock,command_terminal_refs}=current();
-   recoveryDispatch.seal(value,step,result,deadline,clock,command_terminal_refs);
+   const {value,step,clock,evidence}=current();
+   recoveryDispatch.seal(value,step,result,deadline,clock,evidence);
    const after=current();
    const budget=arm.forRun(proposalRun(execution.run_id)).operation.budget.required;
    ledger.plan(after.value,after.step,{request,pairing_ref:grant.pairing_ref,grant:actualGrant},after.clock,
@@ -2002,11 +2031,11 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
   const slot=submissionSlot(id,stepId);submitting.add(slot);
   actionReaders.set(id,(bindingId,socket,input)=>{
    const verify=()=>writer(()=>{
-    const {step,clock,command_terminal_refs,pair}=current(),paired=authorizeControllerPeerInTransaction(bindingId,socket);
+    const {value,step,clock,evidence,pair}=current(),paired=authorizeControllerPeerInTransaction(bindingId,socket);
     need(same(input,original.body.request.action)&&same(step.submission?.attempt,original.attempt)&&
      same(pair,paired.record)&&same(peerScope(paired.peer),grant.lookup.controller_scope)&&
-     same(step.ready.body.command_terminal_refs,command_terminal_refs),'execution_action_binding');
-    recoveryDispatch.checkClock(initial.value,step,clock,original.attempt.clock);
+     same(step.ready.body.command_terminal_refs,evidence.terminals)&&same(step.prepared_parameters.body.delay_window_refs,evidence.windows),'execution_action_binding');
+    recoveryDispatch.checkClock(value,step,clock,original.attempt.clock);
     return {execution,step_plan:step.plan,step_ready:step.ready,parameters:step.prepared_parameters,eligible_before_ns:deadline,
      recovery:{binding:initial.value.bound.binding,start:started.start,source_step_plan:step.source_step_plan,source_parameters:step.source_parameters}};
    });
@@ -2024,6 +2053,42 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
    const found=await lookupSubmission(original).catch(()=>null);
    if(found&&isOpen()&&db.open)writer(()=>adoptLookup(original,found));
   }finally{submitting.delete(slot);}
+ }
+ async function advanceRecoveryDelay(initial,snapshot){
+  const {execution_ref,registration,execution}=initial.value,id=execution.execution_id,stepId=initial.step.plan.step_id;
+  const targets=execution.grant_basis.map(({lookup,receipt_ref,grant_ref,pairing_ref},index)=>({
+   request:{lookup,receipt_ref,grant_ref},pairing_ref,plan:registration.plans[index]
+  }));
+  const [observations,transports]=await Promise.all([
+   inBatches(targets,({request,pairing_ref})=>observeRecoveryPreparation(pairing_ref.id,structuredClone(request))),
+   readArmSourceTransports(snapshot.sources)
+  ]);
+  if(!recoveryDispatchLive())return;
+  return writer(()=>{
+   function verify(){
+    const value=readRecoveryDispatch(id),step=value?.steps.find(item=>item.plan.step_id===stepId);
+    need(value&&step&&!value.protection&&same(value.execution_ref,execution_ref),'run_recovery_dispatch_changed');
+    assertRecoveryDispatchBasis(value,snapshot,transports);
+    const deadlines=observations.map((proof,index)=>{
+     const target=targets[index],observation=proof.original,pair=armPlanPair(target.plan);
+     need(observation.state==='eligible'&&same(observation.request,target.request)&&same(pairingReference(pair),target.pairing_ref)&&
+      proof.assertCurrentInTransaction()===true,'run_recovery_preparation_ineligible');
+     return [observation.eligible_before_ns,pair.expires_ns].map(BigInt);
+    }).flat();
+    const clock=recoveryDispatchClock(value),tick=BigInt(clock.tick_ns);
+    need(deadlines.every(end=>BigInt(clock.upper_ns)<end)&&tick>=BigInt(initial.clock.tick_ns)&&
+     tick<BigInt(initial.clock.valid_before_tick_ns),'run_recovery_dispatch_expired');
+    const evidence=recoveryStepEvidence(value.steps,step,clock);
+    need(evidence,'run_recovery_dispatch_changed');
+    return {value,step,clock,evidence,tick};
+   }
+   const current=verify(),budget=arm.forRun(proposalRun(execution.run_id)).operation.budget.required;
+   recoveryDispatch.writeDelay(current.value,current.step,current.clock,current.evidence,budget);
+   const final=verify(),body=final.step.window.body;
+   need(final.tick>=current.tick&&final.tick<BigInt(body.deadline_tick_ns),'delay_window_expired');
+   const remaining=BigInt(body.due_tick_ns)-final.tick;
+   return final.step.elapsed||remaining<=0n?0n:remaining;
+  });
  }
  return Object.freeze({
   ...(executions?.recordScheduled&&{inspectScheduleInTransaction,isScheduleSlotBusyInTransaction(definitionId){
@@ -2120,8 +2185,8 @@ export function automationRunStore({db,service,bootId,isOpen,authority,publicati
      const protection=run.lifecycle==='running'?null:dispatched?.protection??(!recoveryDispatch?'recovery_dispatch_pending':
       started.start.service_boot_id!==bootId?'recovery_restart_protected':'recovery_dispatch_inactive');
      return {execution,execution_ref,plan,steps:started.start.steps,start:started,protection,completion:null,...(dispatched&&{dispatch:{
-      execution_ref:dispatched.execution_ref,steps:dispatched.steps.map(({item,prepared_parameters,submission})=>({step_id:item.step_id,
-       parameters_ref:prepared_parameters?.ref??null,submission}))
+      execution_ref:dispatched.execution_ref,steps:dispatched.steps.map(({item,prepared_parameters,submission,window,elapsed})=>({step_id:item.step_id,
+       parameters_ref:prepared_parameters?.ref??null,submission,...(recoveryDispatch.writeDelay&&{delay_window:window,delay_elapsed:elapsed})}))
      }})};
     }
     return {execution,execution_ref,plan,steps:[],protection:'recovery_reserved',completion:null};
