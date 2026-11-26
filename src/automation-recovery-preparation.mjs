@@ -2,8 +2,9 @@ import {canonical,digest,same} from './runtime/auth-clock-value.mjs';
 import {armPlanOriginal} from './runtime/peer-run-arm-plan.mjs';
 import {armPreparationRecord,preparationResponseLimit} from './runtime/peer-run-preparation.mjs';
 import {need} from './automation-publication.mjs';
+import {nextExecutionRevision} from './automation-execution-commit.mjs';
 
-export function automationRecoveryPreparationStore(db,{withBinding=false}={}){
+export function automationRecoveryPreparationStore(db,{withBinding=false,withStart=false}={}){
  const written=result=>need(result.changes===1,'run_recovery_preparation_storage');
  const registration=db.prepare('SELECT context_id,body_jcs,body_digest FROM automation_recovery_preparation WHERE operation_id=?').raw();
  const targets=db.prepare('SELECT preparation_id,controller_service_id,controller_database_instance_id FROM automation_recovery_preparation_target WHERE operation_id=?').raw();
@@ -12,6 +13,7 @@ export function automationRecoveryPreparationStore(db,{withBinding=false}={}){
  const capacity=table=>db.prepare(`SELECT count(*),coalesce(sum(length(CAST(body_jcs AS BLOB))),0) FROM ${table}`).raw();
  const preparationsSize=capacity('automation_recovery_preparation'),receiptsSize=capacity('automation_recovery_preparation_receipt');
  const bindingsSize=withBinding?capacity('automation_recovery_execution_binding'):null;
+ const startsSize=withStart?capacity('automation_recovery_start'):null;
  function decode(text,hash){
   const body=JSON.parse(text);
   need(canonical(body)===text&&digest(body)===hash,'run_recovery_preparation_integrity');
@@ -78,6 +80,20 @@ export function automationRecoveryPreparationStore(db,{withBinding=false}={}){
    'run_recovery_preparation_integrity');
   return {binding_ref:{kind:'recovery_execution_binding',scope:operation.scope,object_id:operation.new_execution_id,revision:'1',digest:hash},binding:value};
  }
+ function start(original,bound=binding(original)){
+  need(db.inTransaction,'run_recovery_transaction');
+  const row=db.prepare('SELECT context_id,body_jcs,body_digest FROM automation_recovery_start WHERE operation_id=?').raw().get(original.operation.operation_id);
+  if(!row)return null;
+  const [contextId,text,hash]=row,value=decode(text,hash),{operation,operation_ref,execution_ref,plan}=original;
+  need(bound&&value.format==='leafseamer.recovery-start/1'&&value.context_id===contextId&&same(value.operation_ref,operation_ref)&&
+   same(value.execution_ref,execution_ref)&&same(value.binding_ref,bound.binding_ref)&&same(value.approval_ref,bound.binding.approval_ref)&&
+   value.previous_run_revision===bound.binding.run_revision&&value.run_revision===nextExecutionRevision(value.previous_run_revision)&&
+   value.arm_generation===operation.recovery_generation&&value.slot_revision===operation.committed_slot_revision&&
+   value.state==='start_recorded'&&value.dispatch_eligible===false&&
+   same(value.steps.map(({grant_ref,...item})=>item),plan.items)&&value.steps.every(item=>item.grant_ref===null||
+    item.decision==='execute_new'&&bound.binding.grants.some(grant=>same(grant.grant_ref,item.grant_ref))),'run_recovery_preparation_integrity');
+  return {start_ref:{kind:'recovery_start',scope:operation.scope,object_id:operation.operation_id,revision:'1',digest:hash},start:value};
+ }
  return Object.freeze({read,lookup,received,
   ...(withBinding&&{grants,binding,bind(original,body,value){
    need(db.inTransaction,'run_recovery_transaction');
@@ -85,6 +101,17 @@ export function automationRecoveryPreparationStore(db,{withBinding=false}={}){
    written(db.prepare('INSERT INTO automation_recovery_execution_binding VALUES(?,?,?,?)')
     .run(original.operation.operation_id,value.context_id,text,digest(value)));
    return binding(original,body);
+  }}),
+  ...(withStart&&{start,recordStart(original,bound,value){
+   need(db.inTransaction,'run_recovery_transaction');
+   const text=canonical(value);insertSize(startsSize,text);
+   written(db.prepare('INSERT INTO automation_recovery_start VALUES(?,?,?,?)')
+    .run(original.operation.operation_id,value.context_id,text,digest(value)));
+   return start(original,bound);
+  },advanceStart(value,runId){
+   need(db.inTransaction,'run_recovery_transaction');
+   written(db.prepare('UPDATE automation_run_approval_head SET run_revision=? WHERE run_id=? AND approval_id=? AND run_revision=?')
+    .run(value.run_revision,runId,value.approval_ref.object_id,value.previous_run_revision));
   }}),
   operationForPreparation:id=>db.prepare('SELECT operation_id FROM automation_recovery_preparation_target WHERE preparation_id=?').pluck().get(id),
   register(original,body){

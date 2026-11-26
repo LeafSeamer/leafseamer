@@ -128,7 +128,8 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   const recoveries=resumeEnabled?db.prepare('SELECT count(*) FROM automation_recovery_operation WHERE context_id=?').pluck().get(contextId):0;
   const preparations=Number(service.schema_revision)>=42?db.prepare('SELECT count(*) FROM automation_recovery_preparation WHERE context_id=?').pluck().get(contextId):0;
   const bindings=Number(service.schema_revision)>=43?db.prepare('SELECT count(*) FROM automation_recovery_execution_binding WHERE context_id=?').pluck().get(contextId):0;
-  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms+schedules+recoveries+preparations+bindings;
+  const starts=Number(service.schema_revision)>=44?db.prepare('SELECT count(*) FROM automation_recovery_start WHERE context_id=?').pluck().get(contextId):0;
+  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms+schedules+recoveries+preparations+bindings+starts;
  }
  function assertContextCapacity(proof){
   inside();const row=db.prepare('SELECT body_jcs,digest FROM local_request_context WHERE context_id=?').raw().get(proof.context_id);need(row,'context');

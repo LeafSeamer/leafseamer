@@ -395,7 +395,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
  ['R5 可选独立动作确定失败且资源已释放时完成','32',null,'validated','r5_optional'],
  ['R5 缺少释放证据时保留保护并分开核对出口与资源','32',null,'validated','r5_missing_release'],
  ['人员恢复预览固定当前命令核销并保留历史未知终态','40',null,'validated','terminal_reconciled'],
- ['人员恢复原子消费预览并固定已核验的全部准备','43',null,'validated','recovery_reserved'],
+ ['人员恢复原子消费预览并一次性记录新执行开始','44',null,'validated','recovery_reserved'],
  ['R5 提交前目标资格撤回时保留原状态和终态','32',null,'validated','r5_grant_revoked'],
  ['R5 释放写入失败全量回滚并保留对账资格','32',null,'validated','r5_rollback'],
  ['R5 通知已落库未确认时重启并重送原事件','32',null,'validated','r5_notification']
@@ -1400,17 +1400,66 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
           assert.deepEqual(binding.approval_ref,newRef);
           assert.equal(binding.eligible_before_ns,String(epoch+250000000n));
           assert.deepEqual(binding.grants.map(({grant_ref})=>grant_ref),[recoveryRemoteReceipt.applied_receipt.grant_ref]);
+          const startRequest={binding_ref,context_id:contextId};
+          const startExecution=(request=startRequest)=>httpsRead({...selection,start:request},'start-recovery-execution');
           recoveryGrantCurrent=false;
           const grantReads=recoveryGrantReads;
           assert.deepEqual(await bind(),bindingReply);
           assert.equal(recoveryGrantReads,grantReads);
+          assert.deepEqual(await startExecution(),{status:409,body:{error:'PREFLIGHT_INELIGIBLE'}});
+          assert.deepEqual(await startExecution({...startRequest,binding_ref:{...binding_ref,digest:digest('different binding')}}),
+           {status:409,body:{error:'REVISION_CONFLICT'}});
           const reopened=new Database(filename);
           try{
            const after=automationRunStore({...assembly,db:reopened,bootId:id(),isOpen:()=>reopened.open});
            assert.deepEqual(after.getRecoveryExecutionBinding(null,run.run_id,operation.operation_id),bindingReply.body.result);
            assert.equal(after.get(null,run.run_id).dispatch_eligible,false);
+           await assert.rejects(after.startRecoveryExecution(null,run.run_id,operation.operation_id,startRequest),
+            {code:'run_recovery_preparation_changed'});
           }finally{reopened.close();}
           assert.deepEqual(runs.get(null,run.run_id),updated);
+          recoveryGrantCurrent=true;
+          resumeAllowed=false;
+          assert.deepEqual(await startExecution(),{status:403,body:{error:'PERMISSION_DENIED'}});
+          resumeAllowed=true;
+          transportChanged=true;
+          assert.deepEqual(await startExecution(),{status:409,body:{error:'REVISION_CONFLICT'}});
+          transportChanged=false;
+          db.exec(`CREATE TEMP TRIGGER omit_recovery_start_revision BEFORE UPDATE ON automation_run_approval_head
+           WHEN OLD.run_revision='8' AND NEW.run_revision='9' BEGIN SELECT RAISE(IGNORE); END`);
+          assert.deepEqual(await startExecution(),{status:503,body:{error:'WORKER_NOT_READY'}});
+          db.exec('DROP TRIGGER omit_recovery_start_revision');
+          assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_start').pluck().get(),0);
+          assert.deepEqual(runs.get(null,run.run_id),updated);
+          const starts=await Promise.all([startExecution(),startExecution()]);
+          assert.equal(starts[0].status,202,JSON.stringify({starts,failures}));
+          assert.deepEqual(starts[1],starts[0]);
+          const {start_ref,start}=starts[0].body.result;
+          assert.equal(start_ref.digest,digest(start));
+          assert.deepEqual(start.binding_ref,binding_ref);
+          assert.deepEqual(start.execution_ref,binding.execution_ref);
+          assert.equal(start.run_revision,'9');
+          assert.equal(start.dispatch_eligible,false);
+          const expectedSteps=previewResult.body.result.preview.plan.items.map(item=>({...item,
+           grant_ref:item.step_id==='first'?recoveryRemoteReceipt.applied_receipt.grant_ref:null}));
+          assert.deepEqual(start.steps,expectedSteps);
+          assert.equal(start.steps[0].decision,'execute_new');
+          assert.equal(db.prepare('SELECT count(*) FROM automation_recovery_start').pluck().get(),1);
+          assert.deepEqual(runs.get(null,run.run_id),{...updated,revision:'9'});
+          const newExecution=runs.getExecution(null,operation.new_execution_id);
+          assert.deepEqual(newExecution.start,starts[0].body.result);
+          assert.equal(newExecution.protection,'recovery_dispatch_pending');
+          recoveryGrantCurrent=false;
+          resumeAllowed=false;
+          const readsAfterStart=recoveryGrantReads;
+          assert.deepEqual(await startExecution(),starts[0]);
+          assert.equal(recoveryGrantReads,readsAfterStart);
+          const afterStart=new Database(filename);
+          try{
+           const after=automationRunStore({...assembly,db:afterStart,bootId:id(),isOpen:()=>afterStart.open});
+           assert.deepEqual(after.getExecution(null,operation.new_execution_id),newExecution);
+           assert.equal(after.get(null,run.run_id).lifecycle,'paused');
+          }finally{afterStart.close();}
           assert.deepEqual(readStep(runs.getExecution(null,executionId)).submission.terminal,terminal);
           assert.equal(db.prepare('SELECT count(*) FROM automation_arm_preparation_receipt').pluck().get(),1);
           assert.equal(commandSubmits,1);

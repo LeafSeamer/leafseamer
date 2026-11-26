@@ -45,6 +45,7 @@ const runApprovalRequests=new Map([
  ['inspect-recovery-preparation',['run_id','operation_id']],
  ['bind-recovery-execution',['run_id','operation_id','context_id']],
  ['get-recovery-execution-binding',['run_id','operation_id']],
+ ['start-recovery-execution',['run_id','operation_id','start']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -189,6 +190,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'inspect-recovery-preparation':return runs.getRecoveryPreparation(handle,request.run_id,request.operation_id);
    case 'bind-recovery-execution':return runs.bindRecoveryExecution(handle,request.run_id,request.operation_id,request.context_id);
    case 'get-recovery-execution-binding':return runs.getRecoveryExecutionBinding(handle,request.run_id,request.operation_id);
+   case 'start-recovery-execution':return runs.startRecoveryExecution(handle,request.run_id,request.operation_id,request.start);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -262,7 +264,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     recoveryPreviewOperations.has(body.operation)&&!runs.previewRecovery||
     recoveryOperations.has(body.operation)&&!runs.resumeRun||
     preparationOperations.has(body.operation)&&!runs.prepareRecovery||
-    executionBindingOperations.has(body.operation)&&!runs.bindRecoveryExecution)){empty(res,404);return;}
+    executionBindingOperations.has(body.operation)&&!runs.bindRecoveryExecution||
+    body.operation==='start-recovery-execution'&&!runs.startRecoveryExecution)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});
@@ -280,7 +283,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    else if(req.url===runApprovalPath)value=await manageRunApproval(handle,body);
    else if(req.url===schedulePath)value=manageSchedule(handle,body);
    else value=body.operation==='inspect'?authorization.get(handle,body.request.principal_id):authorization.replace(handle,body.request);
-   replyLocal(req.url===runApprovalPath&&body.operation==='resume'?202:200,{result:value});
+   replyLocal(req.url===runApprovalPath&&['resume','start-recovery-execution'].includes(body.operation)?202:200,{result:value});
   }catch(error){
    observe(error);if(typeof error==='number'){empty(res,error);return;}
    const [status,code]=failure(error);replyLocal(status,{error:code});

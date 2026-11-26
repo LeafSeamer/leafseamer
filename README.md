@@ -423,6 +423,8 @@ Seamer 先原子登记完整请求，再经配对提交。每个目标固定绑�
 
 显式迁移至 Schema 43 后，恢复发起人可凭近期认证和有效恢复上下文调用 `bind-recovery-execution`，请求为 `{run_id, operation_id, context_id}`。Seamer 要求完整准备回执，按原身份复核各目标当前 RunGrant 资格，并重新核对旧代保护、命令资源、已发布依赖和来源连续性。任一证据缺失、变化或到期时，运行保持暂停。核验通过后，Seamer 原子保存新执行与全目标实际 RunGrant 的绑定原件。用 `get-recovery-execution-binding` 查询 `{run_id, operation_id}` 可查回原件。绑定是历史证据，恢复开始和实际派发仍需当前资格及写入门控。
 
+显式迁移至 Schema 44 后，恢复发起人可调用 `start-recovery-execution`，请求为 `{run_id, operation_id, start}`，其中 `start` 提供 `binding_ref` 和 `context_id`。同一启动域内，Seamer 复核全目标当前资格和原恢复基线，在同一事务固定新执行步骤并推进运行修订。重新执行的动作只引用该目标的新 RunGrant，保留成功的步骤仅引用原完成证据。HTTP 202 返回固定开始记录，查回原记录使用当前运行读取权限。重启后原记录可以查回。收到 202 时运行仍暂停，新执行查询返回 `recovery_dispatch_pending`，等待接入受保护的动作派发路径。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
