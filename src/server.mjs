@@ -184,6 +184,8 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
    runApproval:Number(storage.identity.schema_revision)>=7?storage.runs.readApprovalForPeer:null,
    runInitiator:storage.runs?.readArmInitiatorForPeer??null,
    runArmPlan:storage.runs?.prepareArmPlanForPeer??null,
+   runRecoveryInitiator:storage.runs?.readRecoveryInitiatorForPeer??null,
+   runRecoveryPlan:storage.runs?.prepareRecoveryPlanForPeer??null,
    runActionBinding:storage.runs?.prepareActionBindingForPeer??null,
    runEndorsementRevocation:storage.runs?.receiveEndorsementRevocation??null,
    eventAge:Number(storage.identity.schema_revision)>=5?{selection:contractSelection,read:(reference,publisher)=>reconcile?.ageEvidenceForPublisher(reference,publisher)}:null,
@@ -210,6 +212,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   }
   if(storage.runs?.submitArmPreparation)storage.bindArmPreparationTransport({submit:peerTransport.submitRunPreparation,lookup:peerTransport.lookupRunPreparation,
    eligibility:peerTransport.prepareRunPreparationEligibility});
+  if(storage.runs?.prepareRecovery)storage.bindRecoveryPreparationTransport({submit:peerTransport.submitRecoveryPreparation,lookup:peerTransport.lookupRecoveryPreparation});
   if(storage.runs?.reconcileAutomationSubmission&&peerTransport.submitAutomationCommand){
    storage.bindAutomationCommandTransport({submit:peerTransport.submitAutomationCommand,lookup:peerTransport.lookupAutomationCommand,
     result:peerTransport.readAutomationCommandResult,resource:peerTransport.readAutomationCommandResource});

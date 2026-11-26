@@ -41,6 +41,8 @@ const runApprovalRequests=new Map([
  ['resume',['run_id','reservation']],
  ['get-recovery-operation',['run_id','operation_id']],
  ['lookup-recovery-operation',['run_id','context_id','idempotency_key']],
+ ['prepare-recovery',['run_id','operation_id','context_id']],
+ ['inspect-recovery-preparation',['run_id','operation_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -52,6 +54,7 @@ const armOperations=new Set(['create-arm-context','record-arm-preflight','arm','
 const revocationOperations=new Set(['create-revocation-context','revoke','lookup-revocation']);
 const recoveryPreviewOperations=new Set(['preview-recovery','get-recovery-preview','revalidate-recovery-preview']);
 const recoveryOperations=new Set(['create-resume-context','resume','get-recovery-operation','lookup-recovery-operation']);
+const preparationOperations=new Set(['prepare-recovery','inspect-recovery-preparation']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -92,8 +95,9 @@ function failure(error){
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
   'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict',
   'run_recovery_execution_conflict','run_recovery_preview_changed','run_recovery_operation_conflict',
-  'run_recovery_approval_changed','run_recovery_approval_scope','run_recovery_approval_control'].includes(code))return [409,'REVISION_CONFLICT'];
- if(code==='run_preflight_expired'||code==='run_recovery_protection_expired')return [409,'PREFLIGHT_EXPIRED'];
+  'run_recovery_approval_changed','run_recovery_approval_scope','run_recovery_approval_control','run_recovery_preparation_changed',
+  'run_recovery_preparation_issuer'].includes(code))return [409,'REVISION_CONFLICT'];
+ if(['run_preflight_expired','run_recovery_protection_expired','run_recovery_preparation_expired'].includes(code))return [409,'PREFLIGHT_EXPIRED'];
  if(code==='run_recovery_preview_reference')return [400,'INVALID_REQUEST'];
  if(code==='run_recovery_preview_missing'||code==='run_recovery_operation_missing')return [404,'NOT_FOUND'];
  if(code==='run_recovery_preview_capacity')return [429,'CAPACITY_EXCEEDED'];
@@ -177,6 +181,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'resume':return runs.resumeRun(handle,request.run_id,request.reservation);
    case 'get-recovery-operation':return runs.getRecoveryOperation(handle,request.run_id,request.operation_id);
    case 'lookup-recovery-operation':return runs.lookupRecoveryOperation(handle,request.run_id,request);
+   case 'prepare-recovery':return runs.prepareRecovery(handle,request.run_id,request.operation_id,request.context_id);
+   case 'inspect-recovery-preparation':return runs.getRecoveryPreparation(handle,request.run_id,request.operation_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -248,7 +254,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     body.operation==='observe-recovery-protection'&&!runs.observeRecoveryProtection||
     body.operation==='preflight-recovery'&&!runs.preflightRecovery||
     recoveryPreviewOperations.has(body.operation)&&!runs.previewRecovery||
-    recoveryOperations.has(body.operation)&&!runs.resumeRun)){empty(res,404);return;}
+    recoveryOperations.has(body.operation)&&!runs.resumeRun||
+    preparationOperations.has(body.operation)&&!runs.prepareRecovery)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

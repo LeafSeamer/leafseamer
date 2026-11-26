@@ -104,7 +104,7 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   need(s.principal_kind==='human','human');recheck(authentication,found,true);
   const authentication_evidence={snapshot_id:s.snapshot_id,issuer_revision:s.issuer_revision,issuer_service_id:found.value.issuer_service_id,
    snapshot_digest:digest(s),recent_authentication:found.value.recent_authentication,grant_ref:ref(found.grant),authorization_digest:proof.authorization_digest};
-  if(operation_id===armOperation){
+  if(operation_id===armOperation||operation_id===resumeOperation&&Number(service.schema_revision)>=42){
    need(uuid(found.value.token_id),'arm_token');
    authentication_evidence.credential={issuer_service_id:found.value.issuer_service_id,token_id:found.value.token_id,session_id:s.session_id,
     session_revision:s.session_revision,credential_id:s.credential_id,policy_revision:s.policy_revision,scope_digest:s.scope_digest,
@@ -126,7 +126,8 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
   const arms=Number(service.schema_revision)>=14?db.prepare('SELECT count(*) FROM automation_run_arm WHERE context_id=?').pluck().get(contextId):0;
   const schedules=scheduleEnabled?db.prepare('SELECT count(*) FROM schedule_request WHERE context_id=?').pluck().get(contextId):0;
   const recoveries=resumeEnabled?db.prepare('SELECT count(*) FROM automation_recovery_operation WHERE context_id=?').pluck().get(contextId):0;
-  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms+schedules+recoveries;
+  const preparations=Number(service.schema_revision)>=42?db.prepare('SELECT count(*) FROM automation_recovery_preparation WHERE context_id=?').pluck().get(contextId):0;
+  return draft+approvals+runs+proposals+runApprovals+revocations+eventApprovals+preflights+arms+schedules+recoveries+preparations;
  }
  function assertContextCapacity(proof){
   inside();const row=db.prepare('SELECT body_jcs,digest FROM local_request_context WHERE context_id=?').raw().get(proof.context_id);need(row,'context');
@@ -225,10 +226,10 @@ export function localAuthorization({db,service,bootId,isOpen,clock,receiver,issu
    return {issuer_id:s.issuer_id,issuer_epoch:s.issuer_epoch,principal_id:s.principal_id,principal_kind:s.principal_kind};
   },
   runApprovalTimeInTransaction(){return time();},
-  assertArmInitiatorInTransaction(actor,definition,reference){
+  assertArmInitiatorInTransaction(actor,definition,reference,permission='run.arm'){
    inside();need(actor.principal_kind==='human'&&actor.issuer_id===fixed.issuer_id&&actor.issuer_epoch===fixed.issuer_epoch,'human');
    const id=subject(actor);need(id,'missing');const grant=current(id),now=time();
-   need(same(ref(grant),reference)&&grant.state==='active'&&grant.permissions.includes('run.arm')&&
+   need(same(ref(grant),reference)&&grant.state==='active'&&grant.permissions.includes(permission)&&
     (grant.definition_scope.kind==='all'||grant.definition_scope.definition_ids.includes(definition))&&
     now.lower>=clockInteger(grant.not_before_ns)&&now.upper<clockInteger(grant.expires_ns),'denied');
    return clockInteger(grant.expires_ns);

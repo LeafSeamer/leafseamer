@@ -417,6 +417,10 @@ HTTP 202 表示预览已单次消费。Seamer 原子保存恢复操作、新执�
 
 恢复受理后，当前人员可使用 `propose` 和 `approve` 创建绑定该恢复操作的新组织运行批准。提案沿用原获准的服务主体、完整 Controller 目标、设备动作及参数限制。批准请求的 `expected_prior_approval_ref` 引用原已撤销批准，并提交属于新提案的全部目标背书。Seamer 逐目标复核当前设备在自动模式保护态且没有待处理控制切换，随后原子替换运行的当前批准。原批准保留撤销状态并可查到替换引用。对应 Controller 可通过原配对接口查回新批准，恢复操作仍处于 `reserved`，须另行逐目标准备。
 
+停机后用 `leafseamer migrate-storage --data-dir <数据库绝对目录> --to-revision 42` 启用恢复准备。使用支持 `automation-preparation/0.1.0-draft.3` 的配对运行时和 Controller Schema 78 或更新版本。恢复发起人使用近期认证及有效恢复上下文，在同一本机入口调用 `prepare-recovery`，请求为 `{run_id, operation_id, context_id}`。该步骤适用于含后续动作的恢复计划，并要求各目标能够本机核验人员凭据。
+
+Seamer 先原子登记完整请求，再经配对提交。每个目标固定绑定原拒收代次的 RunGrant、新批准、恢复操作、新代次及新执行。新准备授权以五秒为上限，同时受当前权限、配对及各原授权期限约束。提交尝试只登记一次。回包丢失时，再调用 `prepare-recovery` 按原身份查回已提交的回执。具备当前运行读取权限的人员可用 `inspect-recovery-preparation` 查询 `{run_id, operation_id}` 的状态。 `receipts_observed` 表示全部回执原件已保存。运行和设备保护仍保持，后续启用需要核验当前资格并完成开始事务。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。
