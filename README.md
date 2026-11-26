@@ -370,6 +370,21 @@ Schema 15 增加准备回执账本。停机后执行 `leafseamer migrate-storage
 
 Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-proposals/{proposal_id}`。配对 Controller 须有 `automation.prepare.read`，且服务和数据库必须与提案的目标条目一致。请求绑定提案摘要和一次挑战；返回原件及引用，认证审计通过引用保存。目标 Controller 在本机配对通道使用 `readRunApprovalProposal`，验证响应挑战、摘要、精确目标和有效期限。读取结果供随后核对认可前提，Controller 仍须检查当前签发方授权及本地可授范围。
 
+### 本机撤销运行批准
+
+启用 `public_api.local_run_approvals` 后，使用 `POST /auth/local-run-approvals/v1`。请求通过回环 TLS 1.3 发送，携带定向当前 Seamer 的人员 Bearer 令牌。`Content-Type` 为 `application/json`，正文为规范 JSON `{operation, request}`，上限 32 KiB。入口拒绝带 Cookie、Origin 或代理头的请求。
+
+| 操作 | 请求 |
+| --- | --- |
+| `create-revocation-context` | `{ttl_ms, max_unique_requests}`，返回撤销请求的 `context_id` |
+| `revoke` | `{approval_id, revocation}`。`revocation` 包含 `approval_ref`、`expected_status_revision`、`reason` 和 `context`。`context` 包含 `context_id` 和 `idempotency_key` |
+| `lookup-revocation` | `{approval_id, context_id, idempotency_key}`，查回原请求的摘要和首次受理回执 |
+| `inspect-operation` | `{operation_id}`，返回当前操作和逐目标保护进度 |
+
+撤销要求当前人员具备 `run.approval.revoke`、目标定义的权限与近期认证。查回请求时使用原身份和上下文，并核对当前读取权限。成功响应为 `{result}`。同一请求重复提交返回原受理回执，修订冲突或同一幂等键对应不同正文时返回 HTTP 409。
+
+有 Controller 目标时，`accepted` 表示 Seamer 已记录撤销并排队发送保护通知，`applying` 表示仍等待部分或全部目标完成保护。通过 `inspect-operation` 跟踪当前进度。撤销不会释放原活动槽，也不会授权新运行。
+
 ### 本机排期
 
 显式迁移至 Schema 37 后，在受保护回环监听配置中启用 `public_api.local_schedules`，即可通过 `POST /auth/local-schedules/v1` 发布、激活和读取固定偏移的单次排期。请求使用 TLS 1.3、当前 Seamer 的 Bearer 令牌及规范 JSON `{operation, request}`，成功响应为 `{result}`。

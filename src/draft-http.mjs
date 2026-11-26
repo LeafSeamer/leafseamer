@@ -27,6 +27,10 @@ const runApprovalRequests=new Map([
  ['create-approval-context',['ttl_ms','max_unique_requests']],
  ['approve',['run_id','approval']],
  ['inspect',['run_id']],
+ ['create-revocation-context',['ttl_ms','max_unique_requests']],
+ ['revoke',['approval_id','revocation']],
+ ['lookup-revocation',['approval_id','context_id','idempotency_key']],
+ ['inspect-operation',['operation_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -35,6 +39,7 @@ const runApprovalRequests=new Map([
  ['complete-arm',['operation_ref']]
 ]);
 const armOperations=new Set(['create-arm-context','record-arm-preflight','arm','observe-and-arm','complete-arm']);
+const revocationOperations=new Set(['create-revocation-context','revoke','lookup-revocation']);
 const eventBindingRequests=new Map([
  ['candidate',['definition_id','query']],
  ['create-context',['ttl_ms','max_unique_requests']],
@@ -62,7 +67,7 @@ function readBody(req,res,length){
 function failure(error){
  const code=error?.code??error?.message;
  if(code==='http_token'||code==='peer_identity_inactive'||code==='peer_identity_handle')return [401,'AUTH_REQUIRED'];
- if(['local_authorization_object','definition_missing','draft_request_missing','publication_missing','binding_approval_missing','binding_approval_definition_missing','binding_approval_event_approval_missing','run_missing','run_arm_definition_missing','run_preflight_missing','run_initiator_missing'].includes(code))return [404,'NOT_FOUND'];
+ if(['local_authorization_object','definition_missing','draft_request_missing','publication_missing','binding_approval_missing','binding_approval_definition_missing','binding_approval_event_approval_missing','run_missing','run_arm_definition_missing','run_preflight_missing','run_initiator_missing','run_approval_missing'].includes(code))return [404,'NOT_FOUND'];
  if(['local_authorization_denied','local_authorization_missing','local_authorization_context','local_authorization_recent','http_origin','http_csrf','local_authorization_human','publication_human_required','binding_approval_publication_policy','binding_approval_publication_binding_unapproved','binding_approval_event_approval_context'].includes(code))return [403,'PERMISSION_DENIED'];
  if(['binding_approval_event_source_changed','binding_approval_event_approval_conflict','binding_approval_event_approval_exists','binding_approval_event_approval_revision'].includes(code))return [409,'REVISION_CONFLICT'];
  if(['draft_revision_conflict','metadata_revision_conflict','draft_idempotency_conflict','publication_draft_conflict','publication_idempotency_conflict','binding_approval_conflict','binding_approval_revision','binding_approval_exists','binding_approval_source_changed','run_idempotency_conflict','run_artifact_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
@@ -71,9 +76,9 @@ function failure(error){
  if(['managed_subscription_conflict','managed_subscription_ended','snapshot_ingest_missing','snapshot_ingest_not_current'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='forbidden')return [403,'PERMISSION_DENIED'];
  if(code==='conflict')return [409,'REVISION_CONFLICT'];
- if(['run_proposal_request','run_approval_request','run_approval_targets'].includes(code))return [422,'INVALID_REQUEST'];
+ if(['run_proposal_request','run_approval_request','run_approval_targets','run_approval_revocation_request'].includes(code))return [422,'INVALID_REQUEST'];
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
-  'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
+  'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
  if(code==='run_preflight_expired')return [409,'PREFLIGHT_EXPIRED'];
  if(code==='run_arm_preflight_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
@@ -141,6 +146,10 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'create-approval-context':return authorization.createApproveRunContext(handle,request);
    case 'approve':return runs.approve(handle,request.run_id,request.approval);
    case 'inspect':return runs.getCurrentApproval(handle,request.run_id);
+   case 'create-revocation-context':return authorization.createRevokeRunApprovalContext(handle,request);
+   case 'revoke':return runs.revokeApproval(handle,request.approval_id,request.revocation);
+   case 'lookup-revocation':return runs.lookupApprovalRevocation(handle,request);
+   case 'inspect-operation':return runs.getApprovalOperation(handle,request.operation_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -206,7 +215,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
     }else if(body.operation==='inspect')fields(body.request,['principal_id']);
     else if(body.operation!=='replace')fail('local_authorization_request');
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
-   if(req.url===runApprovalPath&&armOperations.has(body.operation)&&!localRunArm){empty(res,404);return;}
+   if(req.url===runApprovalPath&&(armOperations.has(body.operation)&&!localRunArm||
+    revocationOperations.has(body.operation)&&!runs.revokeApproval)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

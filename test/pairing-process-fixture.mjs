@@ -188,7 +188,8 @@ async function initialize(input,native=null){
    publicationPolicyFactory,...(native?{supervisedReference:native.supervision,referenceSamplingAuthority:native.samplingAuthority}:
     receiverReference&&{referenceTimeProvider:receiverReferenceFixture}),
    publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,
-    localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
+    localRunApprovals:runTargets,localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,
+    onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
    const descriptor_digest=digest({scope,provider:'test Seamer process domain'});
    const clock_domain_id=eventApprovals?'clock_'+descriptor_digest.slice(7):id();
    return fixture(scope,{source,descriptor:supervisedDomain??{clock_domain_id,descriptor_digest}},{sampleWindowPolicy:'authentication-clock-sample/2'}).provider;
@@ -482,7 +483,8 @@ async function execute(command,value){
   assert.ok(appClosed&&seamerPeers);const boot=app.serviceBootId,port=Number(new URL(transport.origin).port);
   app=await startSeamer({...seamerOptions,pairing:{...seamerOptions.pairing,port}});appClosed=false;
   api=app.pairing.api;transport=app.pairing.transport;transport.bindPeers(seamerPeers);
-  assert.notEqual(app.serviceBootId,boot);return app.identity.schema_revision;
+  assert.notEqual(app.serviceBootId,boot);
+  return {schema_revision:app.identity.schema_revision,public_origin:app.publicOrigin};
  }
  if(command==='checkDurableApprovalProtection'){
   assert.ok(appClosed);const db=new Database(path.join(seamerDirectory,'seamer.sqlite'),{readonly:true});

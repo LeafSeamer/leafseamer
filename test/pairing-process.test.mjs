@@ -10,7 +10,7 @@ import {spawn,spawnSync} from 'node:child_process';
 import {once} from 'node:events';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {peerCertificates} from '../../leafseamer-controller/test/fixtures/peer-certificates.mjs';
-import {digest} from '../dist/runtime/auth-clock-value.mjs';
+import {canonical,digest} from '../dist/runtime/auth-clock-value.mjs';
 import {source} from './automation-program-fixture.mjs';
 import {bindingHttpAcceptance} from './binding-http-acceptance.mjs';
 const packageRoot=process.env.LEAFSEAMER_PACKAGE_UNDER_TEST??fileURLToPath(new URL('../',import.meta.url));assert.ok(path.isAbsolute(packageRoot));
@@ -298,18 +298,28 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
   assert.deepEqual(secondaryOperation.approval_ref,secondaryResult.approval_ref);
   assert.equal(secondaryOperation.targets.length,1);
   await a.call('setWireEndorsement',wire);
-  const revokeContext=max=>b.call('createRevokeRunApprovalContext',{handle_id:identity,max_unique_requests:max});
-  await refresh();await assert.rejects(revokeContext(1),{code:'local_authorization_denied'});
+  let runApprovalOrigin=second.apiOrigin;
+  async function runApprovalHttp(operation,request,status='200'){
+   const body=Buffer.from(canonical({operation,request}));
+   const response=await requestHttps(runApprovalOrigin,certificates.ca,{method:'POST',target:'/auth/local-run-approvals/v1',body,
+    headers:[['Authorization','Bearer '+issued.token],['Content-Type','application/json'],['Content-Length',String(body.length)]]});
+   assert.equal(response.status,status,`${operation}: ${response.body}`);
+   const decoded=JSON.parse(response.body);
+   return status==='200'?decoded.result:decoded;
+  }
+  const revokeContext=(max,status)=>runApprovalHttp('create-revocation-context',{ttl_ms:30000,max_unique_requests:max},status);
+  await refresh();assert.deepEqual(await revokeContext(1,'403'),{error:'PERMISSION_DENIED'});
   const approvalGrant=await b.call('localGrant',{handle_id:identity,principal_id:issued.principal_id});
   await b.call('replaceLocalGrant',{handle_id:identity,request:{request_id:id(),principal_id:issued.principal_id,principal_kind:'human',expected_revision:approvalGrant.revision,
    permissions:[...approvalGrant.permissions,'run.approval.revoke'],definition_scope:approvalGrant.definition_scope,not_before_ns:approvalGrant.not_before_ns,expires_ns:approvalGrant.expires_ns}});
   await refresh();
   const revocationContext=await revokeContext(1),failedRevocationContext=await revokeContext(2);
   const revocationRequest={context:{context_id:revocationContext.context_id,idempotency_key:id()},approval_ref:result.approval_ref,expected_status_revision:'1',reason:'取消本次运行授权'};
-  const revokeApproval=(request=revocationRequest)=>b.call('revokeRunApproval',{identity,approval_id:current.approval.approval_id,request});
-  const lookupRevocation=()=>b.call('lookupRunApprovalRevocation',{identity,request:{approval_id:current.approval.approval_id,...revocationRequest.context}});
-  await assert.rejects(revokeApproval({...revocationRequest,expected_status_revision:'2'}),{code:'run_approval_revocation_conflict'});
-  await assert.rejects(revokeApproval({...revocationRequest,context:{...revocationRequest.context,context_id:failedRevocationContext.context_id}}),{code:'run_approval_storage'});
+  const approval_id=current.approval.approval_id;
+  const revokeApproval=(revocation=revocationRequest,status)=>runApprovalHttp('revoke',{approval_id,revocation},status);
+  const lookupRevocation=()=>runApprovalHttp('lookup-revocation',{approval_id,...revocationRequest.context});
+  assert.deepEqual(await revokeApproval({...revocationRequest,expected_status_revision:'2'},'409'),{error:'REVISION_CONFLICT'});
+  assert.deepEqual(await revokeApproval({...revocationRequest,context:{...revocationRequest.context,context_id:failedRevocationContext.context_id}},'503'),{error:'WORKER_NOT_READY'});
   assert.deepEqual(await currentApproval(),current);
   assert.deepEqual(await lookupRevocation(),{request_digest:null,result:null});
   const reversal=await revokeApproval();
@@ -319,7 +329,7 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
   await assert.rejects(inspectArm('3'),{code:'run_preflight_approval'});
   assert.deepEqual(await revokeApproval(),reversal);
   assert.deepEqual((await lookupRevocation()).result,reversal);
-  assert.deepEqual(await b.call('getRunApprovalOperation',{identity,operation_id:reversal.operation_id}),reversal);
+  assert.deepEqual(await runApprovalHttp('inspect-operation',{operation_id:reversal.operation_id}),reversal);
   const revokedApproval=await a.call('readPeerRunApproval',approvalRead);
   assert.equal(revokedApproval.state,'revoking');assert.equal(revokedApproval.local_eligibility,'blocked');assert.equal(revokedApproval.eligible_before_ns,null);
   assert.equal(revokedApproval.revocation_operation_ref.object_id,reversal.operation_id);
@@ -386,7 +396,9 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
   await b.call('close');
   const unadopted=await b.call('checkDurableApprovalProtection',reversal.operation_id);assert.equal(unadopted.receipt,null);
   const originalReceipt=await a.call('restoreApprovalProtection');assert.ok(originalReceipt);
-  assert.equal(await b.call('restartRunProtectionService'),'12');
+  const restarted=await b.call('restartRunProtectionService');
+  assert.equal(restarted.schema_revision,'12');
+  runApprovalOrigin=restarted.public_origin;
   const resumedDelivery=await waitForDelivery('delivered');assert.equal(resumedDelivery.delivered,1);
   assert.equal(resumedDelivery.binding_revocation_scan_failed,0);
   const protectionReceipt=await b.call('deliverApprovalProtection',delivery);
@@ -396,7 +408,7 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
   assert.deepEqual(protectionReceipt.revocation_operation_ref,revokedApproval.revocation_operation_ref);
   await assert.rejects(b.call('deliverConflictingApprovalProtection',delivery),{code:'peer_pairing_response'});
   await refresh();
-  const adopting=await b.call('getRunApprovalOperation',{identity,operation_id:reversal.operation_id});
+  const adopting=await runApprovalHttp('inspect-operation',{operation_id:reversal.operation_id});
   assert.deepEqual(adopting,{...reversal,state:'applying',targets:[{...reversal.targets[0],receipt_ref:{kind:'run_approval_rejection_receipt',
    scope:controllerScope,object_id:protectionReceipt.receipt_id,revision:'1',digest:digest(protectionReceipt)}}]});
   assert.deepEqual((await lookupRevocation()).result,reversal);
