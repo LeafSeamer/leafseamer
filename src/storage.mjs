@@ -195,7 +195,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
  need(publicationPolicy===null||publicationSource===null&&typeof publicationPolicy.assertCurrentInTransaction==='function','publication_source_configuration');
  need(armAdmissionPolicy===null||typeof armAdmissionPolicy.inspectInTransaction==='function','run_arm_policy_configuration');
  let db;try{
-  db=open(filename(directory));const value=validate(db),bootId=crypto.randomUUID();let closed=false,pairings=null,bindingApprovals=null,snapshotIngest=null,sourceTransportReader=null,serviceApprovalReader=null,runEndorsementReader=null,readRevokedEndorsement=null,sendProtection=null,preparationTransport=null,commandTransport=null,boundAuthority=draftAuthority;
+  db=open(filename(directory));const value=validate(db),bootId=crypto.randomUUID();let closed=false,pairings=null,bindingApprovals=null,snapshotIngest=null,sourceTransportReader=null,serviceApprovalReader=null,runEndorsementReader=null,readRevokedEndorsement=null,sendProtection=null,observeProtection=null,preparationTransport=null,commandTransport=null,boundAuthority=draftAuthority;
   if(expectedIdentity!==null)need(value.service_id===expectedIdentity.service_id&&value.database_instance_id===expectedIdentity.database_instance_id,'protected_ingress_identity');
   const authority={authorizeInTransaction(input){need(boundAuthority,'draft_authority_unavailable');return boundAuthority.authorizeInTransaction(input);},
    commitRequestInTransaction(input){boundAuthority?.commitRequestInTransaction?.(input);},
@@ -296,6 +296,7 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
      need(!closed&&pairings,'run_endorsement_unavailable');return pairings.authorizeRunProtectionInTransaction(bindingId,socket,'controller');
     }:null,
     sendApprovalProtection(...args){need(!closed&&sendProtection,'run_approval_protection_unavailable');return sendProtection(...args);},
+    observeApprovalProtection(...args){need(!closed&&observeProtection,'run_approval_protection_unavailable');return observeProtection(...args);},
     sendArmPreparation(...args){need(!closed&&preparationTransport,'run_preparation_transport_unavailable');return preparationTransport.submit(...args);},
     lookupArmPreparation(...args){need(!closed&&preparationTransport,'run_preparation_transport_unavailable');return preparationTransport.lookup(...args);},
     observeArmPreparation(...args){need(!closed&&preparationTransport,'run_preparation_transport_unavailable');return preparationTransport.eligibility(...args);},
@@ -308,7 +309,11 @@ export function openStorage(directory,{draftAuthority=null,publicationSource=nul
    bindRunServiceApprovals(reader){need(!closed&&Number(value.schema_revision)>=6&&pairings&&boundAuthority&&!serviceApprovalReader,'run_service_approval_dependencies');serviceApprovalReader=reader;},
    bindRunEndorsements(reader){need(!closed&&Number(value.schema_revision)>=7&&pairings&&boundAuthority&&!runEndorsementReader,'run_endorsement_dependencies');runEndorsementReader=reader;},
    bindRevokedEndorsementReader(reader){need(!closed&&Number(value.schema_revision)>=10&&pairings&&boundAuthority&&!readRevokedEndorsement&&typeof reader==='function','run_endorsement_dependencies');readRevokedEndorsement=reader;},
-   bindRunProtectionTransport(send){need(!closed&&Number(value.schema_revision)>=9&&pairings&&boundAuthority&&!sendProtection&&typeof send==='function','run_approval_protection_dependencies');sendProtection=send;},
+   bindRunProtectionTransport(send,observe=null){
+    need(!closed&&Number(value.schema_revision)>=9&&pairings&&boundAuthority&&!sendProtection&&typeof send==='function'&&
+     (observe===null||typeof observe==='function'),'run_approval_protection_dependencies');
+    sendProtection=send;observeProtection=observe;
+   },
    bindArmPreparationTransport({submit,lookup,eligibility}){
     need(!closed&&Number(value.schema_revision)>=15&&pairings&&boundAuthority&&!preparationTransport&&
      [submit,lookup,eligibility].every(method=>typeof method==='function'),'run_preparation_transport_unavailable');

@@ -381,12 +381,15 @@ Seamer 的独立双向 TLS 监听提供 `GET /internal/automation/approval-propo
 | `lookup-revocation` | `{approval_id, context_id, idempotency_key}`，查回原请求的摘要和首次受理回执 |
 | `inspect-operation` | `{operation_id}`，返回当前操作和逐目标保护进度 |
 | `inspect-recovery-evidence` | `{run_id, execution_id}`，返回当前暂停运行中该活动执行的保护回执与命令资源证据 |
+| `observe-recovery-protection` | `{run_id, execution_id}`，对同一执行实时复核原撤销通知的全部 Controller 目标，并附各目标的当前结果 |
 
 撤销要求当前人员具备 `run.approval.revoke`、目标定义的权限与近期认证。查回请求时使用原身份和上下文，并核对当前读取权限。成功响应为 `{result}`。同一请求重复提交返回原受理回执，修订冲突或同一幂等键对应不同正文时返回 HTTP 409。
 
 有 Controller 目标时，`accepted` 表示 Seamer 已记录撤销并排队发送保护通知，`applying` 表示仍等待部分或全部目标完成保护。通过 `inspect-operation` 跟踪当前进度。撤销不会释放原活动槽，也不会授权新运行。
 
 恢复证据查询要求人员具有当前 `run.read` 和目标定义权限。`observed_protection` 返回 Seamer 已持久采用的回执引用。各动作分别列出原 Controller、设备、提交状态、命令引用、已观察终态及其中的资源证据引用。`applied` 记录保护回执覆盖的代次和设备，恢复前仍须核对当前保护和逐命令资源证据。即使终态记录为 `clear`，缺少资源释放证据也会阻止可选独立动作的后继和执行完成提交。
+
+实时复核使用同样的人员和定义权限。Seamer 按原通知在当前配对上查询每个 Controller，返回前复核权限、配对、执行和已保存回执，且整个查询须落在两秒窗口及原认证样本的有效期内。只有所有目标当前都返回与已保存原件一致的完成回执，`current_protection` 才为 `verified`。未完成、找不到、通信不可用、远端无法确认或回执不一致时，整体返回 `unconfirmed` 并保留逐目标结果。原执行保持暂停，实际资源释放及人员恢复由后续流程核对。
 
 ### 本机排期
 

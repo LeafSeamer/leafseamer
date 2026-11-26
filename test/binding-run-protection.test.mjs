@@ -452,12 +452,12 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     db.prepare('INSERT INTO peer_pairing_head VALUES(?,1)').run(pairing.binding_id);
    }
   }).immediate();
-  let tick=100n,principalKind='human',limited=false,revokeOnWrite=false,currentInitiator=true,peerDatabase=target?.database_instance_id;
+  let tick=100n,validBeforeTick=10000000000n,principalKind='human',limited=false,revokeOnWrite=false,currentInitiator=true,peerDatabase=target?.database_instance_id;
   let sourceChanged=false,transportChanged=false,expireOnCompletionWrite=false,executionGrantDenied=false,expireOnPlanWrite=false;
   let pendingSource=null;
   const domain={clock_domain_id:id()};
   const wallTime=()=>({tick:expireOnCompletionWrite&&db.prepare('SELECT 1 FROM automation_arm_completion').pluck().get()?tick+2000000000n:tick,
-   domain,lower:epoch,upper:expireOnPlanWrite&&db.prepare('SELECT 1 FROM automation_execution_seal').pluck().get()?epoch+250000000n:epoch});
+   domain,validBeforeTick,lower:epoch,upper:expireOnPlanWrite&&db.prepare('SELECT 1 FROM automation_execution_seal').pluck().get()?epoch+250000000n:epoch});
   const proof={id:id(),revision:'1',digest:digest('reviewed test profile')};
   pairing.expires_ns=String(epoch+3600000000000n);pairing.transcript_digest=digest(pairing.transcript);
   authEvidence.grant_ref=proof;
@@ -476,6 +476,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    mode:'automatic',gate_state:'protected',pending_operation_id:null};
   const policy=ref('run_endorsement_policy',target,id(),digest('target policy original'));
   let seamerTransport,observeActionBinding,observedAfterReceipt,observedActionPreparation,remoteProtection,revocationId,scheduledActionRead,observedScheduled;
+  let observeProtectionReply=null;
   let scheduledObservations=0,ordinaryObservations=0,schedulePeerReady=true;
   let commandSubmits=0,commandLookups=0,commandFound=false,sentCommand=null,savedAdjudication=null,terminalReply=null,terminalReads=0;
   const assembly={db,service:{...f.identity,schema_revision},bootId:boot,isOpen:()=>db.open,
@@ -498,6 +499,7 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
    lookupAutomationCommand(...args){return seamerTransport.lookupAutomationCommand(...args);},
    readAutomationCommandResult(...args){return seamerTransport.readAutomationCommandResult(...args);},
    sendApprovalProtection(...args){return seamerTransport.deliverRunApprovalProtection(...args);},
+   observeApprovalProtection(...args){return seamerTransport.observeRunApprovalProtection(...args);},
    authorizeControllerPeerInTransaction(binding,socket){assert.equal(binding,pairing.binding_id);if(socket)assert.equal(socket.authorized,true);
     return {record:pairing,peer:{service_id:target.authority_service_id,database_instance_id:peerDatabase,service_kind:'controller'}};},
    prepareEndorsement:async(_binding,object_ref)=>({original:{object_ref,endorsement:{authorization_basis_refs:[policy]}},
@@ -658,7 +660,9 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
     }
    }:null;
    const [a,b]=await Promise.all([peer(target,'controller',aMaterial,{automationCommands:commands,runApprovalProtection(_binding,socket,notice,options){
-    assert.equal(socket.authorized,true);assert.equal(options.completion,true);
+    assert.equal(socket.authorized,true);
+    if(options.observation)return observeProtectionReply(notice,options.observation);
+    assert.equal(options.completion,true);
     assert.equal(digest(notice),(remoteProtection.rejection??remoteProtection).request_digest);return remoteProtection;
    },runPreparations:{prepare(_binding,socket,submitted){
     assert.deepEqual(submitted,intent.request);
@@ -1122,8 +1126,8 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         const {leaves:[listener],ca}=peerCertificates();
         const app=await startDraftHttp({cert:listener.cert,key:listener.key,bindingId:id(),service:assembly.service,bootId:boot,
          receiver:{async prepare(){return null;}},authorization:{},drafts:{},runs,localRunApprovals:true});
-        const httpsRead=payload=>new Promise((resolve,reject)=>{
-         const body=Buffer.from(canonical({operation:'inspect-recovery-evidence',request:payload}));
+        const httpsRead=(payload,operation='inspect-recovery-evidence')=>new Promise((resolve,reject)=>{
+         const body=Buffer.from(canonical({operation,request:payload}));
          const req=https.request(new URL('/auth/local-run-approvals/v1',app.origin),{method:'POST',ca,agent:false,
           headers:{Authorization:'Bearer v1.'+id()+'.'+'A'.repeat(43),'Content-Type':'application/json','Content-Length':body.length}},response=>{
           const chunks=[];response.on('data',chunk=>chunks.push(chunk));response.on('error',reject);
@@ -1134,8 +1138,34 @@ for(const [label,schema_revision,delayCase=null,parameterCase=null,commandCase=n
         try{
          assert.deepEqual(await httpsRead(request),{status:200,body:{result:expected}});
          assert.deepEqual(await httpsRead({...request,execution_id:id()}),{status:409,body:{error:'REVISION_CONFLICT'}});
+         let reads=0;
+         const report=(state,completion=applied)=>(original,challenge_id)=>{
+          assert.deepEqual(original,notice);reads++;
+          return {format:'leafseamer.run-approval-protection-observation/1',challenge_id,request_digest:digest(notice),state,completion};
+         };
+         const liveRead=()=>httpsRead(request,'observe-recovery-protection');
+         const view=(targetState,state='unconfirmed')=>({status:200,body:{result:{...expected,
+          current_protection:{state,targets:[{target_scope:target,state:targetState}]}}}});
+         observeProtectionReply=report('verified');
+         assert.deepEqual(await liveRead(),view('verified','verified'));
+         observeProtectionReply=report('indeterminate');
+         assert.deepEqual(await liveRead(),view('indeterminate'));
+         observeProtectionReply=report('verified',{...applied,receipt_id:id()});
+         assert.deepEqual(await liveRead(),view('unconfirmed'));
+         observeProtectionReply=()=>{throw Error('test unavailable Controller');};
+         assert.deepEqual(await liveRead(),view('unavailable'));
+         const start=tick;
+         validBeforeTick=start+1n;
+         observeProtectionReply=(notice,challenge)=>{
+          tick=validBeforeTick;validBeforeTick+=1000000n;
+          return report('verified')(notice,challenge);
+         };
+         assert.deepEqual(await liveRead(),{status:409,body:{error:'PREFLIGHT_EXPIRED'}});
+         assert.equal(reads,4);
          principalKind='service';
          assert.deepEqual(await httpsRead(request),{status:403,body:{error:'PERMISSION_DENIED'}});
+         assert.deepEqual(await liveRead(),{status:403,body:{error:'PERMISSION_DENIED'}});
+         assert.equal(reads,4);
         }finally{principalKind='human';await app.close();}
         assert.equal(runs.get(null,run.run_id).active_execution_id,executionId);
         assert.equal(runs.get(null,run.run_id).lifecycle,'paused');

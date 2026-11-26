@@ -232,7 +232,7 @@ export async function startSeamer({dataDir,host='127.0.0.1',port=0,authenticatio
   if(storage.runs?.scanArmPreparation)armPreparationDelivery=startOutboxDelivery({scan:storage.runs.scanArmPreparation,
    async deliver(item){return (await storage.runs.deliverArmPreparation(item)).state;},pageSize:4});
   if(storage.runs?.deliverApprovalProtection){
-   storage.bindRunProtectionTransport(peerTransport.deliverRunApprovalProtection);
+   storage.bindRunProtectionTransport(peerTransport.deliverRunApprovalProtection,peerTransport.observeRunApprovalProtection);
    runProtectionDelivery=startOutboxDelivery({scan(request){
     try{storage.runs.adoptBindingRevocations?.();}
     catch{bindingRevocationScanFailures=Math.min(Number.MAX_SAFE_INTEGER,bindingRevocationScanFailures+1);}

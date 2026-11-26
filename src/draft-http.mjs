@@ -32,6 +32,7 @@ const runApprovalRequests=new Map([
  ['lookup-revocation',['approval_id','context_id','idempotency_key']],
  ['inspect-operation',['operation_id']],
  ['inspect-recovery-evidence',['run_id','execution_id']],
+ ['observe-recovery-protection',['run_id','execution_id']],
  ['inspect-arm-prerequisites',['run_id','expected_revision']],
  ['create-arm-context',['ttl_ms','max_unique_requests']],
  ['record-arm-preflight',['run_id','expected_revision','context_id']],
@@ -81,7 +82,7 @@ function failure(error){
  if(['run_proposal_changed','run_proposal_revision','run_approval_revision','run_preflight_approval','run_preflight_revision',
   'run_preflight_transition','run_preflight_changed','run_arm_slot_changed','run_arm_conflict','run_approval_revocation_conflict',
   'run_recovery_execution_conflict'].includes(code))return [409,'REVISION_CONFLICT'];
- if(code==='run_preflight_expired')return [409,'PREFLIGHT_EXPIRED'];
+ if(code==='run_preflight_expired'||code==='run_recovery_protection_expired')return [409,'PREFLIGHT_EXPIRED'];
  if(code==='run_arm_preflight_ineligible')return [409,'PREFLIGHT_INELIGIBLE'];
  if(code==='run_preparation_receipts_incomplete')return [409,'PREPARATION_PENDING'];
  if(['run_arm_request','run_preflight_reference'].includes(code))return [422,'INVALID_REQUEST'];
@@ -153,6 +154,7 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    case 'lookup-revocation':return runs.lookupApprovalRevocation(handle,request);
    case 'inspect-operation':return runs.getApprovalOperation(handle,request.operation_id);
    case 'inspect-recovery-evidence':return runs.inspectRecoveryEvidence(handle,request.run_id,request.execution_id);
+   case 'observe-recovery-protection':return runs.observeRecoveryProtection(handle,request.run_id,request.execution_id);
    case 'inspect-arm-prerequisites':return runs.inspectArmPrerequisites(handle,request.run_id,request.expected_revision);
    case 'create-arm-context':return authorization.createArmRunContext(handle,request);
    case 'record-arm-preflight':
@@ -220,7 +222,8 @@ export async function startDraftHttp({host='127.0.0.1',port=0,cert,key,bindingId
    }catch{replyLocal(400,{error:'INVALID_REQUEST'});return;}
    if(req.url===runApprovalPath&&(armOperations.has(body.operation)&&!localRunArm||
     revocationOperations.has(body.operation)&&!runs.revokeApproval||
-    body.operation==='inspect-recovery-evidence'&&!runs.inspectRecoveryEvidence)){empty(res,404);return;}
+    body.operation==='inspect-recovery-evidence'&&!runs.inspectRecoveryEvidence||
+    body.operation==='observe-recovery-protection'&&!runs.observeRecoveryProtection)){empty(res,404);return;}
    if(req.url===sourceSubscriptionPath){
     const value=await sourceSubscriptions.connect(body.request,async()=>{
      const handle=await receiver.prepare({binding_id:bindingId,token});

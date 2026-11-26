@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import {canonical,digest,same} from './runtime/auth-clock-value.mjs';
 import {endorsementReference} from './runtime/peer-run-approval-endorsement.mjs';
 import {runApprovalReference} from './runtime/peer-run-approval.mjs';
+import {pairingReference} from './runtime/peer-pairing-value.mjs';
 import {approvalProtectionNotice,approvalProtectionReceipt,runApprovalProtectionReply,endorsementRevocationNotice,endorsementRevocationReceipt} from './runtime/peer-run-approval-protection.mjs';
 import {peerScope,proposalReference,proposalTarget,proposalWindowEnd} from './runtime/peer-run-approval-proposal.mjs';
 import {checked,need} from './automation-publication.mjs';
@@ -541,7 +542,14 @@ export function runApprovalStore({db,scope,requestEpoch,writer,authority,authori
     return {request_digest:row?.[4]??null,result:row?readRevocation(row,saved).result:null};
    });
   });
- }}),...(canAdoptProtection&&{scanApprovalProtection,deliverApprovalProtection}),...(canCompleteProtection&&{recoveryProtectionInTransaction}),
+ }}),...(canAdoptProtection&&{scanApprovalProtection,deliverApprovalProtection}),...(canCompleteProtection&&{recoveryProtectionInTransaction,
+  prepareRecoveryProtectionInTransaction(operationRef,target){
+   need(db.inTransaction,'run_approval_transaction');
+   const notice=queuedProtection(operationRef.object_id,target);
+   need(same(notice.revocation_operation_ref,operationRef),'run_approval_integrity');
+   try{return {notice,pairing_ref:pairingReference(pairFor(target,'automation.protect'))};}
+   catch(error){if(error.code!=='run_approval_pairing')throw error;return {notice,pairing_ref:null};}
+  }}),
  ...(bindingRevocationForRun&&{adoptBindingRevocations}),
  ...(rejectFromPeer&&{receiveEndorsementRevocation})});
 }
