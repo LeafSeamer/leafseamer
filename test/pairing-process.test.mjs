@@ -40,11 +40,12 @@ function peer(t){
  return {call,exited,child};
 }
 
-for(const mode of ['drafts','management','revocation','automatic','delivery-restart','controller-app','bindings'])test(mode==='bindings'?'真实跨进程人员身份与TLS注册读取形成Seamer本地绑定批准，变化及撤销拒绝':mode==='drafts'?'两个独立进程完成真实身份、公共草稿与撤权查原；首次配对管理为合成来源':mode==='management'?'两个独立进程将配对管理切换到真实人员，本地交集允许撤销当前身份核验配对':mode==='automatic'?'注销后自动交付会话拒绝并保存回执':mode==='delivery-restart'?'Controller新进程从持久outbox恢复并查回Seamer原回执':mode==='controller-app'?'Controller正式启动器装配HTTPS人员令牌、内部核验与自动拒绝并统一关闭':'真实会话撤销经双向TLS持久拒绝旧身份并查回原回执；新进程仍拒绝', {timeout:90000},async t=>{
- const certificates=peerCertificates(),a=peer(t),b=peer(t),outsider=mode==='bindings'?peer(t):null,[ac,bc,otherCert]=certificates.leaves;
- const first=await a.call('initialize',{role:'controller',material:ac,ca:certificates.ca,automaticDenials:mode==='automatic',productController:mode==='controller-app',bindingRead:mode==='bindings',runTargets:mode==='bindings'});
+for(const mode of ['drafts','management','revocation','automatic','delivery-restart','controller-app','bindings','run-browser'])test(mode==='run-browser'?'真实浏览器以人员令牌读取 Seamer 运行并在注销后清除结果':mode==='bindings'?'真实跨进程人员身份与TLS注册读取形成Seamer本地绑定批准，变化及撤销拒绝':mode==='drafts'?'两个独立进程完成真实身份、公共草稿与撤权查原；首次配对管理为合成来源':mode==='management'?'两个独立进程将配对管理切换到真实人员，本地交集允许撤销当前身份核验配对':mode==='automatic'?'注销后自动交付会话拒绝并保存回执':mode==='delivery-restart'?'Controller新进程从持久outbox恢复并查回Seamer原回执':mode==='controller-app'?'Controller正式启动器装配HTTPS人员令牌、内部核验与自动拒绝并统一关闭':'真实会话撤销经双向TLS持久拒绝旧身份并查回原回执；新进程仍拒绝', {timeout:90000,skip:mode==='run-browser'&&!process.env.LEAFSEAMER_RUN_GUI_TEST_ROOT},async t=>{
+ const boundRuns=mode==='bindings'||mode==='run-browser';
+ const certificates=peerCertificates(),a=peer(t),b=peer(t),outsider=boundRuns?peer(t):null,[ac,bc,otherCert]=certificates.leaves;
+ const first=await a.call('initialize',{role:'controller',material:ac,ca:certificates.ca,automaticDenials:mode==='automatic',productController:mode==='controller-app',bindingRead:boundRuns,runTargets:boundRuns});
  const issuer={service_id:first.identity.service_id,issuer_id:first.identity.issuer_id,issuer_epoch:first.identity.issuer_epoch};
- const second=await b.call('initialize',{role:'seamer',material:bc,ca:certificates.ca,issuer,principal_id:first.principal_id,allowedOrigins:[first.apiOrigin],bindingRead:mode==='bindings',runTargets:mode==='bindings'});
+ const second=await b.call('initialize',{role:'seamer',material:bc,ca:certificates.ca,issuer,principal_id:first.principal_id,allowedOrigins:[first.apiOrigin],bindingRead:boundRuns,runTargets:boundRuns});
  const third=outsider?await outsider.call('initialize',{role:'controller',material:otherCert,ca:certificates.ca}):null;
  assert.notEqual(first.pid,second.pid);assert.notEqual(first.pid,process.pid);assert.notEqual(second.pid,process.pid);
  assert.equal((await fetch(second.publicOrigin+'/health/live')).status,200);assert.equal((await fetch(second.publicOrigin+'/health/ready')).status,503);
@@ -54,8 +55,8 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
  await b.call('bind',[describe(first,ac),...(third?[describe(third,otherCert)]:[])]);
  if(outsider)await outsider.call('bind',[describe(second,bc)]);
  const bindingScope={format:'leafseamer.device-binding-scope/1',authority_service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,device_ids:first.device_id?[first.device_id]:[]};
- const begin=BigInt(Date.now())*1000000n-1000000000n,parties=[first,second].map(p=>({...p.configuration,binding_id:p.bindingId??id(),permissions:mode==='bindings'&&p===second?['auth.introspect','auth.revoke','automation.bindings.read','automation.prepare','automation.prepare.read','automation.protect','clock.internal.read']:
-  ['auth.introspect','auth.revoke',...(mode==='bindings'?['automation.prepare.read','automation.protect']:[]),'clock.internal.read'],object_scope_digest:mode==='bindings'&&p===second?digest(bindingScope):digest({devices:[]}),not_before_ns:String(begin),expires_ns:String(begin+120000000000n)}));
+ const begin=BigInt(Date.now())*1000000n-1000000000n,parties=[first,second].map(p=>({...p.configuration,binding_id:p.bindingId??id(),permissions:boundRuns&&p===second?['auth.introspect','auth.revoke','automation.bindings.read','automation.prepare','automation.prepare.read','automation.protect','clock.internal.read']:
+  ['auth.introspect','auth.revoke',...(boundRuns?['automation.prepare.read','automation.protect']:[]),'clock.internal.read'],object_scope_digest:boundRuns&&p===second?digest(bindingScope):digest({devices:[]}),not_before_ns:String(begin),expires_ns:String(begin+120000000000n)}));
  const transcript={format:'leafseamer.peer-pairing/1',pair_attempt_id:id(),parties},ar=await a.call('stage',{request_id:id(),transcript}),br=await b.call('stage',{request_id:id(),transcript});
  assert.notEqual(ar.service_boot_id,br.service_boot_id);assert.notEqual(ar.runtime_domain_ref.clock_domain_id,br.runtime_domain_ref.clock_domain_id);
  assert.equal((await a.call('status',ar.binding_id)).state,'staged');assert.equal((await b.call('status',br.binding_id)).state,'staged');
@@ -87,10 +88,10 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
  assert.equal(received.identity.issuer_service_id,first.identity.service_id);
  assert.equal(received.identity.snapshot.issuer_id,issuer.issuer_id);assert.equal(received.identity.snapshot.issuer_epoch,issuer.issuer_epoch);
  assert.equal(received.identity.snapshot.audience,second.identity.service_id);assert.equal(received.identity.snapshot.principal_id,issued.principal_id);
- assert.equal(received.identity.snapshot.session_id,issued.session_id);assert.deepEqual(received.identity.snapshot.permissions,['auth.manage','auth.read','definition.edit','definition.publish','definition.read','request.create','request.read',...(mode==='bindings'?['run.approval.revoke','run.approve','run.manage','run.read']:[])]);
+ assert.equal(received.identity.snapshot.session_id,issued.session_id);assert.deepEqual(received.identity.snapshot.permissions,['auth.manage','auth.read','definition.edit','definition.publish','definition.read','request.create','request.read',...(boundRuns?['run.approval.revoke','run.approve','run.manage','run.read']:[])]);
  assert.equal(received.identity.recent_authentication.expires_at,new Date(Number(BigInt(issued.recent_before_ns)/1000000n)).toISOString());
  assert.deepEqual(await b.call('currentIdentity',received.handle_id),received.identity);
- if(mode==='bindings'){
+ if(boundRuns){
   const controllerPair=await a.call('get',ar.binding_id),principal=await a.call('createAutomationPrincipal');
   const seamerScope={authority_service_id:second.identity.service_id,database_instance_id:second.identity.database_instance_id};
   const approvalInput={request_id:id(),principal_id:principal.id,expected_revision:principal.revision,audiences:[first.identity.service_id],
@@ -121,6 +122,27 @@ for(const mode of ['drafts','management','revocation','automatic','delivery-rest
   await refresh();
   const run=await b.call('createBoundRun',{identity,approval_id:approved.approval_id,draft_revision:draft.revision});
   assert.equal(run.lifecycle,'disarmed');assert.equal(run.dispatch_eligible,false);
+  if(mode==='run-browser'){
+   const runGui=process.env.LEAFSEAMER_RUN_GUI_TEST_ROOT;
+   const browser={playwright:process.env.LEAFSEAMER_GUI_PLAYWRIGHT,browser:process.env.LEAFSEAMER_GUI_BROWSER,output:process.env.LEAFSEAMER_GUI_OUTPUT};
+   assert.ok([runGui,...Object.values(browser)].every(value=>value&&path.isAbsolute(value)));
+   const directory=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-run-browser-'));
+   t.after(()=>fs.rmSync(directory,{recursive:true,force:true}));
+   const file=path.join(directory,'browser.json'),config=path.join(directory,'site.json'),assets=path.join(directory,'site');
+   fs.writeFileSync(config,JSON.stringify({site_label:'运行状态联调',service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,
+    seamer:{service_label:'Seamer',service_id:second.identity.service_id,database_instance_id:second.identity.database_instance_id,base_url:second.apiOrigin}}));
+   const built=spawnSync(process.execPath,[path.join(runGui,'scripts/build.mjs'),'--config',config,'--out-dir',assets],
+    {encoding:'utf8',windowsHide:true,timeout:30000});
+   assert.equal(built.status,0,built.stderr);
+   await a.call('enableGui',assets);
+   const spki=cert=>crypto.createHash('sha256').update(new crypto.X509Certificate(cert).publicKey.export({type:'spki',format:'der'})).digest('base64');
+   fs.writeFileSync(file,JSON.stringify({...browser,origin:first.apiOrigin,seamerOrigin:second.apiOrigin,spkis:[spki(ac.cert),spki(bc.cert)],run}));
+   const checked=spawnSync(process.execPath,[path.join(runGui,'test/seamer-run-browser-check.mjs'),file],
+    {encoding:'utf8',windowsHide:true,timeout:30000});
+   assert.equal(checked.status,0,[checked.stderr,checked.stdout,checked.error?.code].join('\n'));
+   t.diagnostic(checked.stdout.trim());
+   return;
+  }
   const deviceTargets=()=>b.call('runDeviceTargets',{identity,run_id:run.run_id});
   const resolved=await deviceTargets(),registration=approved.bundle.registration;
   assert.equal(resolved.run_id,run.run_id);assert.match(resolved.dependency_digest,/^sha256:[0-9a-f]{64}$/);
