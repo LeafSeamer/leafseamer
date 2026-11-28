@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
-import {initializeStorage,openStorage} from '../dist/storage.mjs';
+import {initializeStorage,migrateStorage,openStorage,prepareProtectedRecoveryStorage} from '../dist/storage.mjs';
 import {source,digest} from './automation-program-fixture.mjs';
 const tables=['definition_identity','definition_content','definition_metadata','definition_head','definition_request','definition_notification'];
 function directory(t){const dir=fs.mkdtempSync(path.join(os.tmpdir(),'leafseamer-draft-'));t.after(()=>{assert.equal(path.dirname(path.resolve(dir)),path.resolve(os.tmpdir()));fs.rmSync(dir,{recursive:true,force:true,maxRetries:5,retryDelay:50});});return dir;}
@@ -19,6 +20,73 @@ function request(identity,key='create'){
  const value=source();return {context:{context_id:'context-1',idempotency_key:key},content:{program:value.program,selections:[],policy_ref:{kind:'policy',scope:{authority_service_id:identity.service_id,database_instance_id:identity.database_instance_id},object_id:'policy',revision:'1',digest:digest({})}},metadata:{name:'测试定义',description:'',layout:{}}};
 }
 function count(dir){const db=new Database(path.join(dir,'seamer.sqlite'));try{return Object.fromEntries(tables.map(name=>[name,db.prepare('SELECT count(*) FROM '+name).pluck().get()]));}finally{db.close();}}
+
+test('prepares protected recovery storage from a verified snapshot with draft provenance and a new identity',async t=>{
+ const old=directory(t),target=directory(t),rejected=directory(t);
+ initializeStorage(old);
+ const identity=migrateStorage(old,'48'),body=request(identity);
+ const runtime=openStorage(old,{draftAuthority:provider(identity)});
+ let updated;
+ try{
+  const created=runtime.drafts.create('fixture-auth',body);
+  const edit=structuredClone(body.content);edit.program.groups[0].steps[0].parameters.value=true;
+  updated=runtime.drafts.update('fixture-auth',created.definition_id,{context:{context_id:'context-1',idempotency_key:'edit-recovery'},
+   expected_draft_revision:'1',content:edit});
+ }finally{runtime.close();}
+ const snapshot=path.join(old,'snapshot.sqlite'),original=new Database(path.join(old,'seamer.sqlite'),{readonly:true});
+ try{await original.backup(snapshot);}finally{original.close();}
+ const archived=new Database(snapshot);
+ try{assert.equal(archived.pragma('journal_mode=DELETE',{simple:true}),'delete');}finally{archived.close();}
+ const scope={authority:'seamer',service_id:identity.service_id,database_instance_id:identity.database_instance_id,
+  request_epoch:identity.request_epoch,control_epoch:null,schema_revision:'48'};
+ const contents=fs.readFileSync(snapshot),receipt={state:'staged',engine:'3.53.4',backup_operation_id:crypto.randomUUID(),scope,
+  bytes:contents.length,sha256:crypto.createHash('sha256').update(contents).digest('hex')};
+ const nextScope={...scope,database_instance_id:crypto.randomUUID(),request_epoch:crypto.randomUUID()};
+ const input={sourceFile:snapshot,receipt,targetDirectory:target,nextScope,planDigest:digest('approved plan'),dataGenerationId:crypto.randomUUID()};
+ assert.throws(()=>prepareProtectedRecoveryStorage({...input,targetDirectory:rejected,nextScope:{...nextScope,request_epoch:scope.request_epoch}}),
+  {code:'recovery_storage_scope'});
+ assert.throws(()=>prepareProtectedRecoveryStorage({...input,targetDirectory:rejected,receipt:{...receipt,sha256:'0'.repeat(64)}}),
+  {code:'backup_snapshot_digest'});
+ const damaged=path.join(old,'invalid-draft.sqlite');
+ fs.copyFileSync(snapshot,damaged);
+ const damagedDb=new Database(damaged);
+ try{damagedDb.exec("DROP TRIGGER definition_content_no_update; UPDATE definition_content SET content_jcs='{}' WHERE revision='2'");}
+ finally{damagedDb.close();}
+ const damagedBytes=fs.readFileSync(damaged);
+ assert.throws(()=>prepareProtectedRecoveryStorage({...input,sourceFile:damaged,targetDirectory:rejected,
+  receipt:{...receipt,bytes:damagedBytes.length,sha256:crypto.createHash('sha256').update(damagedBytes).digest('hex')}}),
+ {code:'recovery_storage_draft_invalid'});
+ assert.deepEqual(fs.readdirSync(rejected),[]);
+ const preparation=prepareProtectedRecoveryStorage(input),file=path.join(target,'seamer.sqlite');
+ assert.deepEqual(preparation.next_scope,nextScope);
+ assert.equal(preparation.draft_count,1);
+ assert.equal(preparation.draft_review_required,true);
+ assert.equal(preparation.origin.plan_digest,input.planDigest);
+ assert.equal(preparation.origin.snapshot_sha256,receipt.sha256);
+ const prepared=fs.readFileSync(file);
+ assert.equal(preparation.sha256,crypto.createHash('sha256').update(prepared).digest('hex'));
+ assert.equal(preparation.bytes,prepared.length);
+ assert.deepEqual(fs.readdirSync(target),['seamer.sqlite']);
+ assert.deepEqual(fs.readFileSync(snapshot),contents);
+ const db=new Database(file,{readonly:true,fileMustExist:true});
+ try{
+  for(const table of ['service_boot','definition_publication','peer_pairing_revision','local_permission_head','automation_execution','schedule_version'])
+   assert.equal(db.prepare(`SELECT count(*) FROM ${table}`).pluck().get(),0,table);
+  const event=JSON.parse(db.prepare('SELECT body_jcs FROM definition_notification').pluck().get());
+  assert.equal(event.kind,'definitionRestored');
+  assert.equal(event.provenance.draft_revision,'2');
+  assert.equal(event.provenance.content_digest,updated.content_digest);
+  assert.deepEqual(db.pragma('foreign_key_check'),[]);
+ }finally{db.close();}
+ assert.throws(()=>prepareProtectedRecoveryStorage(input),{code:'recovery_storage_destination'});
+ assert.deepEqual(fs.readFileSync(file),prepared);
+ const restored=openStorage(target,{draftAuthority:provider(nextScope),expectedIdentity:nextScope});
+ try{
+  const draft=restored.drafts.get('fixture-auth',updated.definition_id);
+  assert.deepEqual(draft,{...updated,revision:'1',metadata_revision:'1',
+   scope:{authority_service_id:scope.service_id,database_instance_id:nextScope.database_instance_id}});
+ }finally{restored.close();}
+});
 
 test('draft content, metadata and original results survive restart with independent revisions',t=>{
  const dir=directory(t),identity=initializeStorage(dir),authority=provider(identity),body=request(identity);let store=openStorage(dir,{draftAuthority:authority});

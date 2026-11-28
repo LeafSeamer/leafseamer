@@ -13,6 +13,56 @@ const next=revision=>{const value=BigInt(revision)+1n;need(value<10n**20n,'draft
 const checked=(name,value)=>{validateAutomationModel(name,value);return freeze(structuredClone(value));};
 const keys=(value,expected)=>value&&typeof value==='object'&&!Array.isArray(value)&&Object.keys(value).sort().join(',')===[...expected].sort().join(',');
 
+const draftHeads=`SELECT i.definition_id,i.service_id,i.database_instance_id,c.revision,c.content_jcs,c.content_digest,c.selection_digest,
+ m.revision AS metadata_revision,m.metadata_jcs,m.metadata_digest
+ FROM definition_identity i LEFT JOIN definition_head h USING(definition_id)
+ LEFT JOIN definition_content c ON c.definition_id=h.definition_id AND c.revision=h.content_revision
+ LEFT JOIN definition_metadata m ON m.definition_id=h.definition_id AND m.revision=h.metadata_revision`;
+function draftRecord(row,scope){
+ need(row?.revision&&row.metadata_revision,'definition_missing');
+ const content=decode(row.content_jcs,row.content_digest),metadata=decode(row.metadata_jcs,row.metadata_digest);
+ need(hash(content.selections)===row.selection_digest,'draft_integrity');
+ return checked('LifecycleDraftRecord',{scope,definition_id:row.definition_id,revision:row.revision,content,content_digest:row.content_digest,
+  selection_digest:row.selection_digest,metadata_revision:row.metadata_revision,metadata});
+}
+
+// Maintenance creates new draft heads in an unopened generation. It carries provenance, never a previous request identity.
+export function restoreDraftHeads(source,target,sourceScope,next,origin){
+ need(source.readonly&&target.inTransaction,'draft_recovery_writer');
+ const old={authority_service_id:sourceScope.service_id,database_instance_id:sourceScope.database_instance_id};
+ const scope={authority_service_id:next.service_id,database_instance_id:next.database_instance_id};
+ const actor={issuer_id:next.service_id,issuer_epoch:next.request_epoch,principal_id:'local-recovery',principal_kind:'service'};
+ const writeIdentity=target.prepare('INSERT INTO definition_identity VALUES(?,?,?,?)');
+ const writeContent=target.prepare("INSERT INTO definition_content VALUES(?,'1',NULL,?,?,?,?)");
+ const writeMetadata=target.prepare("INSERT INTO definition_metadata VALUES(?,'1',NULL,?,?,?)");
+ const writeHead=target.prepare("INSERT INTO definition_head VALUES(?,'1','1')");
+ const writeRequest=target.prepare("INSERT INTO definition_request VALUES(?,?,?,?,'createDefinition',?,?,?)");
+ const writeNotification=target.prepare('INSERT INTO definition_notification VALUES(?,?,?)');
+ const originals=source.prepare(draftHeads+' ORDER BY i.definition_id');
+ const columns=originals.columns().map(column=>column.name);
+ const origins=crypto.createHash('sha256');let count=0;
+ for(const row of originals.raw().iterate()){
+  const entry=Object.fromEntries(columns.map((column,index)=>[column,row[index]]));
+  need(++count<=4096&&entry.service_id===old.authority_service_id&&entry.database_instance_id===old.database_instance_id,'draft_recovery_source');
+  const id=entry.definition_id,draft=draftRecord(entry,old),transaction=crypto.randomUUID();
+  const recovered=checked('LifecycleDraftRecord',{...draft,scope,revision:'1',metadata_revision:'1'});
+  const original={definition_id:id,draft_revision:draft.revision,metadata_revision:draft.metadata_revision,
+   content_digest:draft.content_digest,metadata_digest:hash(draft.metadata)};
+  const provenance={...origin,source_scope:old,...original};
+  const body=canonicalize(recovered);need(Buffer.byteLength(body)<=16777216,'draft_capacity');
+  writeIdentity.run(id,next.service_id,next.database_instance_id,transaction);
+  writeContent.run(id,canonicalize(recovered.content),recovered.content_digest,recovered.selection_digest,transaction);
+  writeMetadata.run(id,canonicalize(recovered.metadata),original.metadata_digest,transaction);
+  writeHead.run(id);
+  writeRequest.run(transaction,hash({scope,recovery:provenance}),hash(provenance),canonicalize(actor),id,body,hash(recovered));
+  const notification={kind:'definitionRestored',transaction_id:transaction,scope,definition_id:id,revision:'1',
+   content_digest:recovered.content_digest,metadata_revision:'1',actor,provenance};
+  writeNotification.run(transaction,canonicalize(notification),hash(notification));
+  origins.update(canonicalize(original)+'\n');
+ }
+ return {draft_count:count,draft_origin_digest:'sha256:'+origins.digest('hex')};
+}
+
 // authority仅由可信进程装配提供，负责当前人员/服务身份、context、对象权限和认证时钟检查。
 // 缺提供者时读写均拒绝；不能用请求正文中的声明代替该权威。
 export function automationDraftStore({db,service,isOpen,authority=null}){
@@ -28,14 +78,7 @@ export function automationDraftStore({db,service,isOpen,authority=null}){
   need(equal(value.scope,scope)&&value.request_epoch===service.request_epoch&&value.context_id===context_id&&value.operation_id===operation_id&&value.definition_id===definition_id,'draft_authorization_binding');
   return freeze(structuredClone(value));
  }
- function record(id){
-  const row=rows(db,`SELECT c.revision,c.content_jcs,c.content_digest,c.selection_digest,m.revision AS metadata_revision,m.metadata_jcs,m.metadata_digest
-   FROM definition_head h JOIN definition_content c ON c.definition_id=h.definition_id AND c.revision=h.content_revision
-   JOIN definition_metadata m ON m.definition_id=h.definition_id AND m.revision=h.metadata_revision WHERE h.definition_id=?`,id)[0];
-  need(row,'definition_missing');const content=decode(row.content_jcs,row.content_digest),metadata=decode(row.metadata_jcs,row.metadata_digest);
-  need(hash(content.selections)===row.selection_digest,'draft_integrity');
-  return checked('LifecycleDraftRecord',{scope,definition_id:id,revision:row.revision,content,content_digest:row.content_digest,selection_digest:row.selection_digest,metadata_revision:row.metadata_revision,metadata});
- }
+ const record=id=>draftRecord(rows(db,draftHeads+' WHERE i.definition_id=?',id)[0],scope);
  function content(value){
   const result=checked('LifecycleDraftContent',value),seen=new Set();
   for(const selection of result.selections){const key=selection.kind+':'+selection.binding_id;need(!seen.has(key),'draft_duplicate_selection');seen.add(key);}

@@ -7,7 +7,7 @@ import {authenticationClockStore} from './runtime/auth-clock-store.mjs';
 import {canonical} from './runtime/auth-clock-value.mjs';
 import {automationPublicationStore} from './automation-publication-store.mjs';
 import {automationRunStore} from './automation-run-store.mjs';
-import {automationDraftStore} from './automation-draft-store.mjs';
+import {automationDraftStore,DraftError,restoreDraftHeads} from './automation-draft-store.mjs';
 import {seamerPeerPairings} from './peer-pairing.mjs';
 import {localAuthorization} from './local-authorization.mjs';
 import {peerIdentityWatermarks} from './peer-identity-watermark.mjs';
@@ -231,16 +231,88 @@ export function migrateStorage(directory,targetRevision){
  finally{db?.close();}
 }
 export function initializeStorage(directory){
+ return createStorage(directory,{service_id:crypto.randomUUID(),database_instance_id:crypto.randomUUID(),request_epoch:crypto.randomUUID()});
+}
+function createStorage(directory,scope){
  const file=filename(directory);fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});let handle;
  try{handle=fs.openSync(file,'wx',0o600);}catch(error){throw new StorageError(error.code==='EEXIST'?'database_already_exists':'database_create_failed');}fs.closeSync(handle);
  let db;try{
   db=open(file);need(pragma(db,'journal_mode=WAL')==='wal','wal_unavailable');
   db.transaction(()=>{
    db.exec(sql);pragma(db,'application_id='+applicationId);pragma(db,'user_version=1');
-   db.prepare("INSERT INTO service_state VALUES(1,'seamer',?,?,?,'1','protected')").run(crypto.randomUUID(),crypto.randomUUID(),crypto.randomUUID());
+   db.prepare("INSERT INTO service_state VALUES(1,'seamer',?,?,?,'1','protected')").run(scope.service_id,scope.database_instance_id,scope.request_epoch);
    db.prepare("INSERT INTO schema_migration VALUES(?,'0','1',?,'committed')").run(crypto.randomUUID(),digest);
   }).immediate();return validate(db);
  }finally{db?.close();}
+}
+
+export function prepareProtectedRecoveryStorage({sourceFile,receipt,targetDirectory,nextScope,planDigest,dataGenerationId}={}){
+ const original=receipt?.scope,next=nextScope;
+ const targetRevision=Number(next?.schema_revision);
+ need(next?.authority==='seamer'&&original?.authority==='seamer'&&next.control_epoch===null&&next.service_id===original.service_id&&
+  Object.keys(next).sort().join(',')==='authority,control_epoch,database_instance_id,request_epoch,schema_revision,service_id'&&
+  ['service_id','database_instance_id','request_epoch'].every(key=>typeof next[key]==='string'&&uuid.test(next[key])&&next[key].length===36)&&
+  next.database_instance_id!==original.database_instance_id&&next.request_epoch!==original.request_epoch&&
+  Number.isInteger(targetRevision)&&next.schema_revision===String(targetRevision)&&targetRevision>=Number(original.schema_revision)&&
+  targetRevision>=1&&targetRevision<=migrationDigests.length&&typeof planDigest==='string'&&/^sha256:[0-9a-f]{64}(?![\s\S])/.test(planDigest)&&
+  typeof dataGenerationId==='string'&&dataGenerationId.length===36&&uuid.test(dataGenerationId),'recovery_storage_scope');
+ const file=filename(targetDirectory),directory=path.dirname(file);
+ let stage,source;
+ try{
+  need(fs.lstatSync(directory).isDirectory()&&fs.readdirSync(directory).length===0,'recovery_storage_destination');
+  const initial=fs.lstatSync(sourceFile,{bigint:true});
+  const validateSource=()=>{
+   const current=fs.lstatSync(sourceFile,{bigint:true});
+   need(current.isFile()&&current.nlink===1n&&['dev','ino','size','mtimeNs','ctimeNs'].every(key=>current[key]===initial[key])&&
+    ['-wal','-shm','-journal'].every(suffix=>fs.lstatSync(sourceFile+suffix,{throwIfNoEntry:false})===undefined),'backup_snapshot_file');
+  };
+  verifyBackupSnapshot(sourceFile,receipt);
+  validateSource();
+  source=new Database(sourceFile,{readonly:true,fileMustExist:true,timeout:0});
+  pragma(source,'trusted_schema=OFF');pragma(source,'query_only=ON');
+  stage=fs.mkdtempSync(path.join(directory,'.seamer-recovery-'));
+  const stagedFile=filename(stage);
+  createStorage(stage,next);
+  if(targetRevision>1)migrateStorage(stage,next.schema_revision);
+  const origin={format:'leafseamer.seamer-recovery-origin/1',plan_digest:planDigest,data_generation_id:dataGenerationId,
+   snapshot_receipt_id:receipt.backup_operation_id,snapshot_sha256:receipt.sha256};
+  const target=open(stagedFile);
+  let drafts;
+  try{
+   drafts=source.transaction(()=>target.transaction(()=>{
+    const state=validate(target);
+    need(['authority','service_id','database_instance_id','request_epoch','schema_revision'].every(key=>state[key]===next[key]),
+     'recovery_storage_scope');
+    const result=restoreDraftHeads(source,target,original,state,origin);
+    validate(target);validateSource();
+    return result;
+   }).immediate())();
+  }finally{target.close();}
+  source.close();source=null;
+  validateSource();
+  need(['-wal','-shm','-journal'].every(suffix=>fs.lstatSync(stagedFile+suffix,{throwIfNoEntry:false})===undefined),'recovery_storage_sidecars');
+  const fd=fs.openSync(stagedFile,'r+'),checksum=crypto.createHash('sha256'),buffer=Buffer.alloc(65536);
+  let bytes=0;
+  try{
+   for(let length;(length=fs.readSync(fd,buffer,0,buffer.length,null))>0;){checksum.update(buffer.subarray(0,length));bytes+=length;}
+   fs.fsyncSync(fd);
+  }finally{fs.closeSync(fd);}
+  const sha256=checksum.digest('hex');
+  // A completed database is published with create-only semantics on the same volume.
+  fs.linkSync(stagedFile,file);
+  return {format:'leafseamer.seamer-protected-recovery-storage/1',origin,next_scope:{...next},bytes,sha256,
+   ...drafts,draft_review_required:drafts.draft_count>0,history_retained_in_source:true};
+ }catch(error){
+  if(error instanceof StorageError)throw error;
+  if(error instanceof DraftError)throw new StorageError('recovery_storage_draft_invalid');
+  throw new StorageError(error.code==='EEXIST'?'recovery_storage_destination':'recovery_storage_failed');
+ }finally{
+  source?.close();
+  if(stage){
+   for(const suffix of ['','-wal','-shm','-journal'])fs.rmSync(filename(stage)+suffix,{force:true});
+   fs.rmdirSync(stage);
+  }
+ }
 }
 export function importFirstPairingAuthorization(directory,input){
  let db;

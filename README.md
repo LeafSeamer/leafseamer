@@ -459,3 +459,5 @@ Schema 38 支持原子受理记录。受理事务将场次、激活修订、排�
 ### 始终以只读方式验证备份快照
 
 可信本机维护进程可调用 `dist/storage.mjs` 的 `verifyBackupSnapshot(file, receipt)`。它核对独立 SQLite 文件的长度与 SHA-256、Seamer 身份、请求 epoch、引擎和迁移记录，再用生产读取器复核触发／定时执行原件、步骤证据和普通完成提交。返回报告与原快照回执绑定，包含执行、步骤、活动槽和保护状态计数。维护调用方保管独占暂存目录及执行时限，并在发布前核对归档中对应文件和报告的摘要。
+
+可信恢复程序可调用 `prepareProtectedRecoveryStorage({sourceFile, receipt, targetDirectory, nextScope, planDigest, dataGenerationId})`。目标须是独占的空目录。函数验证原快照并以计划指定的新库实例和请求 epoch 准备保护态 Seamer 库。它把当前定义内容与元数据恢复为待复审草稿，保存原定义、版本和摘要的来源引用。原发布、授权、配对、排期及执行历史继续由原快照保存。返回回执绑定新库长度、摘要、恢复计划和原快照。联装程序负责保管原快照、检查配置和绑定、同步目标目录并审批完整新代的激活。
