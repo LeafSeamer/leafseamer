@@ -124,7 +124,11 @@ if(linuxBootstrap){
   files.push([name,bytes]);
  }
 }
-const controllerLicense=await fs.readFile(new URL('LICENSE',controllerRoot));if(hash(controllerLicense)!==pairingLock.license_sha256)throw new Error('pairing_license_drift');
+const controllerLicenseInput=await fs.readFile(new URL('LICENSE',controllerRoot));
+// Preserve the pinned distribution bytes when the source checkout uses LF.
+const controllerLicense=hash(controllerLicenseInput)===pairingLock.license_sha256?controllerLicenseInput:
+ Buffer.from(controllerLicenseInput.toString('utf8').replace(/\r?\n/g,'\r\n'));
+if(hash(controllerLicense)!==pairingLock.license_sha256)throw new Error('pairing_license_drift');
 files.push(['runtime/PAIRING-LICENSE',controllerLicense]);
 const validationLock=JSON.parse(await fs.readFile(path.join(root,'validation-runtime.json'),'utf8'));
 if(![validationLock.manifest_sha256,...(validationLock.additional_manifests??[])].includes(controllerManifestDigest)||
