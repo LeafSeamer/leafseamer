@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import Database from 'better-sqlite3';
+import {verifyBackupExecutions} from './backup-execution-verification.mjs';
 import {authenticationClockStore} from './runtime/auth-clock-store.mjs';
 import {canonical} from './runtime/auth-clock-value.mjs';
 import {automationPublicationStore} from './automation-publication-store.mjs';
@@ -140,9 +141,10 @@ function identity(db){
   value.maintenance_state==='protected'&&['service_id','database_instance_id','request_epoch'].every(key=>uuid.test(value[key])),'service_identity');
  return Object.freeze({...value});
 }
-function validate(db){
+function validate(db,snapshot=false){
  const version=pragma(db,'user_version');need(pragma(db,'application_id')===applicationId&&Number.isInteger(version)&&version>=1&&version<=migrationDigests.length,'database_version');
- need(pragma(db,'journal_mode')==='wal'&&pragma(db,'quick_check')==='ok'&&db.prepare('PRAGMA foreign_key_check').raw().all().length===0,'database_integrity');
+ need(pragma(db,'journal_mode')===(snapshot?'delete':'wal')&&pragma(db,snapshot?'integrity_check(1)':'quick_check')==='ok'&&
+  db.prepare('PRAGMA foreign_key_check').raw().get()===undefined,'database_integrity');
  const migrations=rows(db,'SELECT * FROM schema_migration ORDER BY CAST(to_revision AS INTEGER)');
  need(migrations.length===version&&migrations.every((row,index)=>row.from_revision===String(index)&&row.to_revision===String(index+1)&&row.script_digest===migrationDigests[index]&&row.state==='committed'),'migration_mismatch');
  const value=identity(db);need(value.schema_revision===String(version),'database_version');
@@ -152,6 +154,53 @@ function validate(db){
   need(uuid.test(epoch),'ingest_epoch');
  }
  return value;
+}
+export function verifyBackupSnapshot(file,receipt){
+ need(typeof file==='string'&&path.isAbsolute(file)&&receipt?.state==='staged'&&receipt.scope?.authority==='seamer'&&
+  receipt.scope.control_epoch===null&&receipt.engine===engine.version&&
+  typeof receipt.backup_operation_id==='string'&&uuid.test(receipt.backup_operation_id)&&
+  Number.isSafeInteger(receipt.bytes)&&receipt.bytes>0&&receipt.bytes<=32*1024**3&&
+  typeof receipt.sha256==='string'&&/^[0-9a-f]{64}(?![\s\S])/.test(receipt.sha256),'backup_snapshot_receipt');
+ let fd,db;
+ try{
+  const before=fs.lstatSync(file,{bigint:true});
+  const sameFile=value=>value.isFile()&&value.nlink===1n&&value.size===BigInt(receipt.bytes)&&
+   value.dev===before.dev&&value.ino===before.ino&&value.ctimeNs===before.ctimeNs&&value.mtimeNs===before.mtimeNs;
+  const noSidecars=()=>['-wal','-shm','-journal'].every(suffix=>fs.lstatSync(file+suffix,{throwIfNoEntry:false})===undefined);
+  need(sameFile(before)&&noSidecars(),'backup_snapshot_file');
+  fd=fs.openSync(file,fs.constants.O_RDONLY|(fs.constants.O_NOFOLLOW??0));
+  need(sameFile(fs.fstatSync(fd,{bigint:true})),'backup_snapshot_file');
+  const header=Buffer.alloc(20);
+  // Reject a WAL file before SQLite can open or create its sidecars.
+  need(fs.readSync(fd,header,0,header.length,0)===header.length&&
+   header.subarray(0,16).equals(Buffer.from('SQLite format 3\0'))&&header[18]===1&&header[19]===1,'backup_snapshot_file');
+  const hash=crypto.createHash('sha256'),buffer=Buffer.alloc(65536);
+  for(let offset=0;offset<receipt.bytes;){
+   const count=fs.readSync(fd,buffer,0,Math.min(buffer.length,receipt.bytes-offset),offset);
+   need(count>0,'backup_snapshot_file');
+   hash.update(buffer.subarray(0,count));offset+=count;
+  }
+  need(hash.digest('hex')===receipt.sha256,'backup_snapshot_digest');
+  db=new Database(file,{readonly:true,fileMustExist:true,timeout:0});
+  const [version,source]=db.prepare('SELECT sqlite_version(),sqlite_source_id()').raw().get();
+  need(version===engine.version&&source===engine.source,'sqlite_engine_mismatch');
+  pragma(db,'trusted_schema=OFF');pragma(db,'query_only=ON');
+  const report=db.transaction(()=>{
+   const state=validate(db,true);
+   const scope={authority:state.authority,service_id:state.service_id,database_instance_id:state.database_instance_id,
+    control_epoch:null,request_epoch:state.request_epoch,schema_revision:state.schema_revision};
+   need(Object.entries(scope).every(([field,value])=>receipt.scope[field]===value),'backup_snapshot_scope');
+   return {format:'leafseamer.seamer-backup-validation/1',backup_operation_id:receipt.backup_operation_id,
+    scope,engine:{...engine},bytes:receipt.bytes,sha256:receipt.sha256,execution_inventory:verifyBackupExecutions(db,scope)};
+  })();
+  need(sameFile(fs.fstatSync(fd,{bigint:true}))&&sameFile(fs.lstatSync(file,{bigint:true}))&&noSidecars(),'backup_snapshot_file');
+  return report;
+ }catch(error){
+  if(error instanceof StorageError)throw error;
+  throw new StorageError(fd===undefined?'backup_snapshot_file':'backup_snapshot_inventory');
+ }finally{
+  try{db?.close();}finally{if(fd!==undefined)fs.closeSync(fd);}
+ }
 }
 export function migrateStorage(directory,targetRevision){
  const version=Number(targetRevision);

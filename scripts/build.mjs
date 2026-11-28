@@ -15,6 +15,7 @@ const files=await Promise.all(names.map(async name=>[name,await fs.readFile(path
 files.push(['peer-event-receiver.mjs',await fs.readFile(path.join(root,'src/peer-event-receiver.mjs'))]);
 files.push(['peer-subscription-client.mjs',await fs.readFile(path.join(root,'src/peer-subscription-client.mjs'))]);
 files.push(['snapshot-lease.mjs',await fs.readFile(path.join(root,'src/snapshot-lease.mjs'))]);
+files.push(['backup-execution-verification.mjs',await fs.readFile(path.join(root,'src/backup-execution-verification.mjs'))]);
 for(const name of ['snapshot-content.mjs','peer-snapshot-receiver.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 for(const name of ['snapshot-ingest-store.mjs','storage-v4.sql','storage-v5.sql','reconcile-inbox.mjs','peer-snapshot-confirmation.mjs','managed-source-subscription.mjs'])files.push([name,await fs.readFile(path.join(root,'src',name))]);
 files.push(['automation-run-store.mjs',await fs.readFile(path.join(root,'src','automation-run-store.mjs'))]);

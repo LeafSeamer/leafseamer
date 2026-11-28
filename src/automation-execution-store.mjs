@@ -37,7 +37,7 @@ export function selectedExecutionSteps(compiled,run,selected){
  return records.map(({step,...group},ordinal)=>({...group,ordinal,step,dependencies:edges.get(step.step_id)}));
 }
 
-export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null,schedules=null,withScheduledRuntime=false}){
+export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays,withActionParameters,withCommandDependencies,withRunCommit,submissions=null,schedules=null,withSchedules=schedules!==null,withScheduledRuntime=false}){
  const writeExecution=db.prepare('INSERT INTO automation_execution(execution_id,run_id,decision_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
  const writeScheduled=schedules&&db.prepare('INSERT INTO automation_execution(execution_id,run_id,occurrence_id,arm_operation_id,body_jcs,body_digest) VALUES(?,?,?,?,?,?)');
  const advanceScheduledRun=schedules&&db.prepare('UPDATE automation_run_approval_head SET run_revision=? WHERE run_id=? AND run_revision=?');
@@ -46,11 +46,11 @@ export function automationExecutionStore(db,scope,bootId,{withAnchors,withDelays
  const writeSeal=db.prepare('INSERT INTO automation_execution_seal VALUES(?,?,?)');
  const writeHead=db.prepare('INSERT INTO automation_execution_head VALUES(?,?)');
  const select=`SELECT e.execution_id,e.run_id,e.decision_id,e.arm_operation_id,e.body_jcs,e.body_digest,s.body_jcs,s.body_digest,d.body_digest
-  ${schedules?',e.occurrence_id,a.body_jcs,a.body_digest':''}
+  ${withSchedules?',e.occurrence_id,a.body_jcs,a.body_digest':''}
   FROM automation_execution e JOIN automation_execution_seal s USING(execution_id) LEFT JOIN automation_trigger_decision d USING(decision_id)
   LEFT JOIN automation_trigger_decision_set t ON t.ingest_epoch=d.ingest_epoch AND t.receive_sequence=d.receive_sequence
-  ${schedules?'LEFT JOIN schedule_execution_admission a ON a.occurrence_id=e.occurrence_id AND a.execution_id=e.execution_id':''}`;
- const sealedSource=schedules?'(t.ingest_epoch IS NOT NULL OR a.occurrence_id IS NOT NULL)':'t.ingest_epoch IS NOT NULL';
+  ${withSchedules?'LEFT JOIN schedule_execution_admission a ON a.occurrence_id=e.occurrence_id AND a.execution_id=e.execution_id':''}`;
+ const sealedSource=withSchedules?'(t.ingest_epoch IS NOT NULL OR a.occurrence_id IS NOT NULL)':'t.ingest_epoch IS NOT NULL';
  const byId=db.prepare(select+' WHERE e.execution_id=? AND '+sealedSource).raw();
  const current=db.prepare(select+' JOIN automation_execution_head h USING(execution_id) WHERE h.definition_id=? AND '+sealedSource).raw();
  const allSteps=db.prepare(`SELECT p.step_id,p.ordinal,p.body_jcs,p.body_digest,w.initial_jcs,w.initial_digest
