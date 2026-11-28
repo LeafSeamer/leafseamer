@@ -142,7 +142,13 @@ async function initialize(input,native=null){
   seamerInitial=input;
   seamerDirectory=directory;seamerIssuer=issuer;
   if(!native){harness.after(()=>{assert.equal(path.dirname(path.resolve(directory)),path.resolve(os.tmpdir()));fs.rmSync(directory,{recursive:true,force:true,maxRetries:5,retryDelay:50});});initializeStorage(directory);}
-  const service=migrateStorage(directory,input.scheduledAdmission?'41':input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
+  const service=migrateStorage(directory,input.recoveryReconciliation?'47':input.scheduledAdmission?'41':
+   input.executionSource?'32':native||armTarget?'27':firstEnrollment?'19':eventApprovals?'17':runTargets?'12':reconcileIngest?'5':snapshotIngest?'4':bindingRead?'3':'2');
+  if(input.recoveryReconciliation&&!native){
+   const db=new Database(path.join(directory,'seamer.sqlite'),{fileMustExist:true});
+   try{db.exec('CREATE TRIGGER test_original_execution_commit BEFORE INSERT ON automation_execution_commit BEGIN SELECT RAISE(IGNORE); END');}
+   finally{db.close();}
+  }
   // 双端测试授时装配有固定时代偏移，年龄上限只用于这份临时安装批准。
   const agePolicy=input.executionSource?{event_age_limits:[{...input.executionSource,capture_semantics:'event_occurrence',max_age_ms:90000}],max_condition_nodes:64}:null;
   publication=publicationMaterial({authority_service_id:service.service_id,database_instance_id:service.database_instance_id},
@@ -188,7 +194,7 @@ async function initialize(input,native=null){
    publicationPolicyFactory,...(native?{supervisedReference:native.supervision,referenceSamplingAuthority:native.samplingAuthority}:
     receiverReference&&{referenceTimeProvider:receiverReferenceFixture}),
    publicApi:{...material,port:native?.resume.publicPort,binding_id:bindingId,allowedOrigins,localPermissions:firstEnrollment,localEventBindings:eventApprovals,
-    localRunApprovals:runTargets||input.scheduledAdmission===true,
+    localRunApprovals:runTargets||input.scheduledAdmission===true||input.recoveryReconciliation===true,
     localSourceSubscriptions:input.managedSubscriptions===true,localSchedules:input.scheduledAdmission===true,
     onFailure:value=>process.send?.({diagnostic:value})},authenticationProvider({scope,source,supervisedDomain}){
    const descriptor_digest=digest({scope,provider:'test Seamer process domain'});

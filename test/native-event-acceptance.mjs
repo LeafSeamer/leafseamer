@@ -23,6 +23,91 @@ function requestHttps(origin,ca,{method,target,headers,body,credential}){
   req.on('error',reject);req.setTimeout(8000,()=>req.destroy(new Error('acceptance_https_timeout')));req.end(body);
  });
 }
+async function verifyRecoveryReconciliation({seamer,controller,origin,ca,bearer,refresh,armed,executionId,original,terminal,approval,proposalRequest,controllerBinding}){
+ function send(operation,input){
+  const body=Buffer.from(canonical({operation,request:input}));
+  return requestHttps(origin,ca,{target:'/auth/local-run-approvals/v1',method:'POST',body,
+   headers:[bearer,['content-type','application/json'],['content-length',String(body.length)]]});
+ }
+ async function request(operation,input,status='200'){
+  const response=await send(operation,input);
+  assert.equal(response.status,status,operation+' '+response.body.toString());
+  return JSON.parse(response.body).result;
+ }
+ const run_id=armed.run_id,readRun=async()=>seamer('getRun',{identity:await refresh(),run_id});
+ const readExecution=async execution_id=>seamer('nativeTriggerExecution',{identity:await refresh(),execution_id});
+ async function awaitResult(label,read,ready){
+  const deadline=performance.now()+12000;
+  let value;
+  do{
+   value=await read();
+   if(ready(value))return value;
+   await delay(100);
+  }while(performance.now()<deadline);
+  assert.fail(label+' '+JSON.stringify({state:value?.state,protection:value?.protection,reason:value?.reason_code,targets:value?.targets,
+   resources:value?.current_resources?.state,currentProtection:value?.current_protection?.state}));
+ }
+ const contextRequest={ttl_ms:30000,max_unique_requests:1};
+ const context=async(operation,max_unique_requests=1)=>({
+  context_id:(await request(operation,{...contextRequest,max_unique_requests})).context_id,idempotency_key:id()});
+ const approval_id=approval.object_id;
+ const revoked=await request('revoke',{approval_id,revocation:{context:await context('create-revocation-context'),
+  approval_ref:approval,expected_status_revision:'1',reason:'核对已完成的模拟器效果'}});
+ await awaitResult('Controller 未完成原批准保护',()=>request('inspect-operation',{operation_id:revoked.operation_id}),value=>value.state==='applied');
+ const recoveryRequest={run_id,execution_id:executionId};
+ const preflight=await request('preflight-recovery',recoveryRequest);
+ assert.equal(preflight.current_protection.state,'verified',JSON.stringify(preflight.current_protection));
+ assert.equal(preflight.current_resources.state,'verified');
+ assert.equal(preflight.current_resources.steps[0].state,'released');
+ assert.equal(preflight.steps[0].terminal.outcome,'succeeded');
+ const reservedRun=await readRun();
+ const resumeContext=await context('create-resume-context',4);
+ const {preview,reserved}=await awaitResult('恢复预览在受理前到期',async()=>{
+  const {preview_ref,preview}=await request('preview-recovery',{...recoveryRequest,expected_revision:reservedRun.revision});
+  assert.equal(preview_ref.digest,digest(preview));
+  assert.equal(preview.plan.mode,'reconcile_commit',JSON.stringify({mode:preview.plan.mode,steps:preview.plan.items,
+   publication:preview.snapshot.publication_current,latches:preview.snapshot.unresolved_latch_ids,sources:preview.snapshot.sources.map(s=>[s.state,s.transport?.state])}));
+  assert.deepEqual(preview.plan.items.map(item=>item.decision),['retain_success']);
+  const reservation={context:resumeContext,expected_revision:reservedRun.revision,preview_ref};
+  const response=await send('resume',{run_id,reservation}),body=JSON.parse(response.body);
+  if(response.status==='409'&&body.error==='PREFLIGHT_EXPIRED')return null;
+  assert.equal(response.status,'202','resume '+response.body.toString());
+  return {preview,reserved:body.result};
+ },Boolean);
+ const {operation}=reserved,{operation_id,new_execution_id}=operation;
+ const pending=await readRun();
+ assert.equal(pending.active_execution_id,new_execution_id);
+ const proposal=await request('propose',{run_id,proposal:{...proposalRequest,context:await context('create-proposal-context'),expected_run_revision:pending.revision}});
+ const endorsement=await controller('endorseRun',{binding_id:controllerBinding,proposal_ref:proposal.proposal_ref});
+ await request('approve',{run_id,approval:{context:await context('create-approval-context'),
+  controller_endorsement_refs:[endorsement.endorsement_ref],expected_prior_approval_ref:approval,
+  expected_run_revision:pending.revision,proposal_ref:proposal.proposal_ref}});
+ const choose={run_id,operation_id},context_id=resumeContext.context_id;
+ await awaitResult('恢复准备缺少真实回执',()=>request('prepare-recovery',{...choose,context_id}),value=>value.state==='receipts_observed');
+ const {binding_ref}=await request('bind-recovery-execution',{...choose,context_id});
+ const start={binding_ref,context_id};
+ const started=await request('start-recovery-execution',{...choose,start},'202');
+ assert.deepEqual(started.start.steps.map(step=>[step.decision,step.grant_ref]),[['retain_success',null]]);
+ const result=await awaitResult('Seamer 未完成恢复结算',()=>request('get-recovery-operation',choose),value=>value.completion);
+ const {completion}=result,view=await readExecution(new_execution_id),previous=await readExecution(executionId);
+ assert.equal(completion.notification.event_id,new_execution_id+'.completed');
+ assert.deepEqual(completion.body.source_execution_ref,original.execution_ref);
+ assert.deepEqual(completion.body.steps,[{step_id:preview.plan.items[0].step_id,decision:'retain_success',
+  outcome:'succeeded',evidence_digest:digest(terminal)}]);
+ assert.deepEqual(view.completion,completion);
+ assert.equal(view.dispatch.steps.every(step=>step.submission===null),true);
+ assert.equal(previous.reconciliation_required,false);
+ assert.deepEqual(previous.steps,original.steps);
+ assert.equal(previous.recovery_completion_ref.digest,completion.digest);
+ const finished=await readRun();
+ assert.equal(finished.lifecycle,'paused');
+ assert.equal(finished.active_execution_id,null);
+ assert.equal(finished.active_operation_id,null);
+ assert.equal(finished.last_execution_id,new_execution_id);
+ assert.deepEqual(await request('start-recovery-execution',{...choose,start},'202'),started);
+ assert.deepEqual(await request('get-recovery-operation',choose),result);
+ return {completion,protection:preflight.current_protection,resource:preflight.current_resources.steps[0].resource};
+}
 async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,grantRef,program,refresh,dispatch,withdrawReference}){
  async function request(operation,input){
   const body=Buffer.from(canonical({operation,request:input}));
@@ -166,7 +251,8 @@ async function verifyScheduledAdmission({seamer,frames,origin,ca,bearer,armed,gr
 }
 export async function verifyNativeEventRead({frames,core,config,materials}){
  const scheduledAdmission=config.scheduled_admission===true;
- const nativeReceiver=config.source_reference_capture&&(scheduledAdmission||process.env.LEAFSEAMER_EVENT_RECEIVER_NATIVE_TEST==='1');
+ const recoveryReconciliation=config.recovery_reconciliation===true;
+ const nativeReceiver=config.source_reference_capture&&(scheduledAdmission||recoveryReconciliation||process.env.LEAFSEAMER_EVENT_RECEIVER_NATIVE_TEST==='1');
  const nativeReferenceAssets=nativeReceiver?process.env.LEAFSEAMER_SUPERVISOR_DIST:null;
  if(nativeReceiver)assert.ok(config.first_enrollment&&nativeReferenceAssets&&path.isAbsolute(nativeReferenceAssets));
  let referenceWitness=null;
@@ -198,7 +284,7 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
   const second=await seamer('initialize',{role:'seamer',material:materials.leaves[1],ca:materials.ca,issuer,principal_id:first.principal_id,
    allowedOrigins:gui?[gui.origin]:[],reconcileIngest:config.verifyEventChannel===true,eventApprovals:config.incremental_source_event===true,
    receiverReference:config.source_reference_capture===true&&!nativeReceiver,nativeReferenceAssets,referenceTimeline,
-   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource,managedSubscriptions,scheduledAdmission});assert.notEqual(first.pid,second.pid);
+   firstEnrollment:config.first_enrollment===true,armTarget:config.arm_target,executionSource,managedSubscriptions,scheduledAdmission,recoveryReconciliation});assert.notEqual(first.pid,second.pid);
   if(browser){
    const directory=path.dirname(config.request),siteFile=path.join(directory,'publication-site.json'),assets=path.join(directory,'publication-gui');
    fs.writeFileSync(siteFile,canonical({site_label:'首次配对发布联调',service_id:first.identity.service_id,database_instance_id:first.identity.database_instance_id,
@@ -566,7 +652,8 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
    const grant=await seamer('localGrant',{handle_id:identity,principal_id:issued.principal_id});
    await seamer('replaceLocalGrant',{handle_id:identity,request:{request_id:id(),principal_id:issued.principal_id,principal_kind:'human',expected_revision:grant.revision,
     permissions:[...new Set([...grant.permissions,'request.create','request.read','definition.read','definition.edit','definition.publish','run.approve','run.arm','run.manage','run.read',
-     ...(scheduledAdmission?['schedule.read','schedule.publish','schedule.activate']:[])])],
+     ...(scheduledAdmission?['schedule.read','schedule.publish','schedule.activate']:[]),
+     ...(recoveryReconciliation?['run.approval.revoke','run.resume']:[])])],
     definition_scope:grant.definition_scope,not_before_ns:grant.not_before_ns,expires_ns:grant.expires_ns}});
    identity=await refresh();
    const context=await seamer('createDraftContext',identity),draft=await seamer('createDraft',{handle_id:identity,context_id:context.context_id,key:id()});
@@ -777,6 +864,14 @@ export async function verifyNativeEventRead({frames,core,config,materials}){
      }while(performance.now()<adoptionUntil);
      assert.deepEqual(submission?.adjudication?.command_ref,settled.reference);
      assert.equal(submission?.terminal?.state.outcome,'succeeded');
+     if(recoveryReconciliation){
+      assert.equal(execution.reconciliation_required,true);
+      assert.equal(execution.completion,null);
+      const recovery=await verifyRecoveryReconciliation({seamer,controller,origin:second.apiOrigin,ca:materials.ca,bearer,refresh,armed,
+       executionId:decision.execution_id,original:execution,terminal:submission.terminal,approval:orgApproval.approval_ref,proposalRequest,controllerBinding:left.binding_id});
+      frames.push({event:'native-recovery-reconciliation',reference:settled.reference,terminal:submission.terminal,grant_ref:grantRef,...recovery});
+      await controller('finish');return;
+     }
      assert.ok(execution.completion,JSON.stringify({protection:execution.protection,reconciliation_required:execution.reconciliation_required}));
      assert.equal(execution.completion.body.execution_ref.object_id,decision.execution_id);
      assert.equal(execution.completion.notification.event_id,decision.execution_id+'.completed');
